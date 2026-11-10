@@ -160,7 +160,7 @@ function OfficeQuestion(props: {
     reportFailure: false,
   });
   const answerable =
-    props.input.responseCapability === "live" &&
+    props.input.responseCapability !== "not_resumable" &&
     props.input.questions.every((question) => question.options.length > 0);
   const answers = buildPendingUserInputAnswers(props.input.questions, drafts);
 

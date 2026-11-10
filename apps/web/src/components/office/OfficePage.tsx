@@ -166,6 +166,8 @@ function NameTag(props: {
   readonly title: string;
   readonly sub?: string | null;
   readonly tone?: "default" | "warning";
+  /** Tags float over cats and let clicks through, unless the tag is the button itself. */
+  readonly clickable?: boolean;
 }) {
   const title = props.title.length > 18 ? `${props.title.slice(0, 17)}…` : props.title;
   const sub = props.sub ?? null;
@@ -173,7 +175,10 @@ function NameTag(props: {
   const height = sub ? 25 : 15;
   const warning = props.tone === "warning";
   return (
-    <g transform={`translate(${props.at[0]},${props.at[1]})`} className="pointer-events-none">
+    <g
+      transform={`translate(${props.at[0]},${props.at[1]})`}
+      className={props.clickable ? undefined : "pointer-events-none"}
+    >
       <rect
         x={-width / 2}
         y={-height}
@@ -467,16 +472,24 @@ function findBoatGates(threads: ReadonlyArray<EnvironmentThreadShell>): Readonly
 
 /** Whether the gate went to boat.dev, from its forced flag or its first output line. */
 function useBoatRoute(gate: BoatGate | null) {
+  // The output keeps only a tail, so the first line scrolls away on a long gate: remember the
+  // route once seen, and stop streaming output then.
+  const [seen, setSeen] = useState<{ itemId: TurnItemId; route: "remote" | "local" } | null>(null);
+  const forced = gate ? boatVerifyRoute(gate.command, "") : null;
+  const remembered = gate && seen?.itemId === gate.itemId ? seen.route : null;
+  const known = forced ?? remembered;
   const streaming = useCommandOutputStreaming(gate?.environmentId ?? ("" as EnvironmentId));
   const { data } = useEnvironmentQuery<CommandOutputView, unknown>(
-    gate && streaming
+    gate && streaming && known === null
       ? orchestrationEnvironment.v2.commandOutput({
           environmentId: gate.environmentId,
           input: { threadId: gate.threadId, itemId: gate.itemId },
         })
       : null,
   );
-  return gate ? boatVerifyRoute(gate.command, data?.output.text ?? "") : null;
+  const printed = data ? boatVerifyRoute("", data.output.text) : null;
+  if (gate && printed && known === null) setSeen({ itemId: gate.itemId, route: printed });
+  return known ?? printed;
 }
 
 function BoatRack(props: {
@@ -531,8 +544,14 @@ function BoatRack(props: {
 }
 
 type Selection =
-  | { readonly kind: "cat"; readonly key: string; readonly anchor: Element }
-  | { readonly kind: "host" | "boat" | "soon"; readonly anchor: Element };
+  | {
+      readonly kind: "cat";
+      readonly key: string;
+      readonly zone: Cat["zone"];
+      readonly needsYou: boolean;
+      readonly anchor: Element;
+    }
+  | { readonly kind: "host" | "boat" | "soon" | "overflow"; readonly anchor: Element };
 
 export function OfficePage() {
   const threads = useQuietThreadShells();
@@ -562,16 +581,23 @@ export function OfficePage() {
     environments.find((environment) => environment.environmentId === hostEnvironmentId)?.label ??
     "This machine";
 
-  const openCat: OpenCat = (cat, anchor) => setSelection({ kind: "cat", key: cat.key, anchor });
-  // The popover follows the cat's live state, and closes when the cat leaves the office.
+  const openCat: OpenCat = (cat, anchor) =>
+    setSelection({ kind: "cat", key: cat.key, zone: cat.zone, needsYou: cat.needsYou, anchor });
+  // The popover follows the cat's live state. It closes when the cat leaves the office or moves,
+  // since the element it points at is gone then.
   const selectedCat =
     selection?.kind === "cat"
       ? ([...layout.desks, ...layout.breakRoom, ...layout.lounge]
           .flatMap((cat) => [cat, ...cat.kittens])
           .find((cat) => cat.key === selection.key) ?? null)
       : null;
-  const popoverOpen = selection !== null && (selection.kind !== "cat" || selectedCat !== null);
-  const open = (kind: "host" | "boat" | "soon") => (anchor: Element) =>
+  const popoverOpen =
+    selection !== null &&
+    (selection.kind !== "cat" ||
+      (selectedCat !== null &&
+        selectedCat.zone === selection.zone &&
+        selectedCat.needsYou === selection.needsYou));
+  const open = (kind: "host" | "boat" | "soon" | "overflow") => (anchor: Element) =>
     setSelection({ kind, anchor });
 
   // Two rows of desks, a third only when they fill up.
@@ -579,13 +605,14 @@ export function OfficePage() {
   const desks = layout.desks.slice(0, deskSlots.length);
   const breakRoom = layout.breakRoom.slice(0, BREAK_SPOTS.length);
   const lounge = layout.lounge.slice(0, LOUNGE_SPOTS.length);
-  const overflow =
-    layout.desks.length -
-    desks.length +
-    layout.breakRoom.length -
-    breakRoom.length +
-    layout.lounge.length -
-    lounge.length;
+  // Cats with no spot left, listed from the overflow sign so every one stays reachable.
+  const overflowLabel = (count: number) => `${count} more ${count === 1 ? "cat" : "cats"}`;
+  const overflowCats = [
+    ...layout.desks.slice(desks.length),
+    ...desks.flatMap((cat) => cat.kittens.slice(KITTEN_OFFSETS.length)),
+    ...layout.breakRoom.slice(breakRoom.length),
+    ...layout.lounge.slice(lounge.length),
+  ];
   const workingCount = layout.desks.filter((cat) => cat.working && !cat.needsYou).length;
   const kittenCount = layout.desks.reduce((sum, cat) => sum + cat.kittens.length, 0);
   const firstNeed = layout.needsYou[0] ?? null;
@@ -728,11 +755,15 @@ export function OfficePage() {
       ),
     });
   }
-  if (overflow > 0) {
+  if (overflowCats.length > 0) {
     const [ox, oy] = iso(5.4, 8.0);
     drawn.push({
       depth: 13.5,
-      node: <NameTag key="overflow" at={[ox, oy - 4]} title={`+${overflow} more cats`} />,
+      node: (
+        <Hit key="overflow" label={overflowLabel(overflowCats.length)} onOpen={open("overflow")}>
+          <NameTag at={[ox, oy - 4]} title={`+${overflowLabel(overflowCats.length)}`} clickable />
+        </Hit>
+      ),
     });
   }
   drawn.sort((a, b) => a.depth - b.depth);
@@ -948,6 +979,20 @@ export function OfficePage() {
                 ? `A boat-verify gate is running for “${boatGate.threadTitle}”. Green lights mean it went to a boat.dev VM, and dark means it runs locally. Amber means the route isn't known yet: a background gate's output isn't visible here, so pass --remote or --local to show it.`
                 : "No boat-verify gate is running. The rack lights up while a gate runs on a boat.dev VM."}
             </p>
+          ) : selection?.kind === "overflow" ? (
+            <div className="flex max-h-72 flex-col gap-1 overflow-y-auto">
+              {overflowCats.map((cat) => (
+                <button
+                  key={cat.key}
+                  type="button"
+                  onClick={() => openCat(cat, selection.anchor)}
+                  className="flex items-center gap-2 rounded-md px-2 py-1 text-left text-sm transition-colors hover:bg-accent"
+                >
+                  <OfficeCatAvatar fur={catFurFor(cat.key)} pose={poseOf(cat)} size={24} />
+                  <span className="min-w-0 flex-1 truncate">{cat.thread.title}</span>
+                </button>
+              ))}
+            </div>
           ) : selection?.kind === "soon" ? (
             <p className="text-sm">
               Coming soon: the ideas whiteboard and Scout, who fetches GitHub issues that match your

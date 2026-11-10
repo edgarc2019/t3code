@@ -60,7 +60,7 @@ describe("layoutOffice", () => {
     expect(ids(layout.needsYou)).toEqual(["approval", "asking"]);
   });
 
-  it("puts working or asking subagents beside their parent and drops the rest", () => {
+  it("keeps a parent at its desk beside its working subagents and drops the rest", () => {
     const layout = layoutOffice(
       inOrder(
         thread("parent", { runtime: running }),
@@ -68,14 +68,19 @@ describe("layoutOffice", () => {
         thread("kitten-asking", { hasPendingUserInput: true, lineage: kittenOf("parent") }),
         thread("kitten-done", { lineage: kittenOf("parent") }),
         thread("orphan", { runtime: running, lineage: kittenOf("gone") }),
+        thread("waiting-on-kittens", { settledOverride: "settled", settledAt: ago(30) }),
+        thread("delegate", { runtime: running, lineage: kittenOf("waiting-on-kittens") }),
       ),
       NOW,
     );
 
-    expect(ids(layout.desks)).toEqual(["parent"]);
+    expect(ids(layout.desks)).toEqual(["parent", "waiting-on-kittens"]);
     expect(ids(layout.desks[0]!.kittens)).toEqual(["kitten-working", "kitten-asking"]);
+    expect(ids(layout.desks[1]!.kittens)).toEqual(["delegate"]);
+    expect(layout.desks[1]!.working).toBe(false);
     expect(ids(layout.needsYou)).toEqual(["kitten-asking"]);
     expect(ids(layout.breakRoom)).toEqual([]);
+    expect(ids(layout.lounge)).toEqual([]);
   });
 });
 

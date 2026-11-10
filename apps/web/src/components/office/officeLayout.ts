@@ -53,7 +53,7 @@ const isListed = (thread: OfficeThread) => isListedThreadLineage(thread.lineage)
 /**
  * Where each thread's cat sits. Running or waiting threads take a desk; finished
  * threads drink coffee in the break room until settled, then nap in the lounge.
- * Subagent threads only appear as kittens beside a parent that is in the office.
+ * Working subagent threads are kittens at their parent's desk; the rest stay out of the office.
  */
 export function layoutOffice<T extends OfficeThread>(
   threads: ReadonlyArray<T>,
@@ -75,28 +75,29 @@ export function layoutOffice<T extends OfficeThread>(
     return recent(thread.updatedAt) ? { ...base, zone: "breakRoom" } : null;
   };
 
-  const adults = new Map<string, Omit<OfficeCat<T>, "kittens">>();
-  for (const thread of sorted) {
-    if (!isListed(thread)) continue;
-    const cat = place(thread);
-    if (cat) adults.set(cat.key, cat);
-  }
-
+  const listed = sorted.filter(isListed);
+  const listedKeys = new Set(listed.map(keyOf));
   const kittensByParent = new Map<string, Array<OfficeCat<T>>>();
   for (const thread of sorted) {
     if (isListed(thread)) continue;
     const cat = place(thread);
     const parentKey = `${thread.environmentId}:${thread.lineage.parentThreadId}`;
-    if (!cat || cat.zone !== "desk" || !adults.has(parentKey)) continue;
+    if (!cat || cat.zone !== "desk" || !listedKeys.has(parentKey)) continue;
     const list = kittensByParent.get(parentKey) ?? [];
     list.push({ ...cat, kittens: [] });
     kittensByParent.set(parentKey, list);
   }
 
-  const cats = [...adults.values()].map((cat): OfficeCat<T> => ({
-    ...cat,
-    kittens: kittensByParent.get(cat.key) ?? [],
-  }));
+  const cats = listed.flatMap((thread): Array<OfficeCat<T>> => {
+    const cat = place(thread);
+    const kittens = kittensByParent.get(keyOf(thread)) ?? [];
+    // A parent whose subagents still work keeps its desk, even after its own turn ends.
+    if (kittens.length > 0) {
+      const base = cat ?? { key: keyOf(thread), thread, working: false, needsYou: false };
+      return [{ ...base, zone: "desk", kittens }];
+    }
+    return cat ? [{ ...cat, kittens: [] }] : [];
+  });
   const needsYou = cats
     .flatMap((cat) => [cat, ...cat.kittens])
     .filter((cat) => cat.needsYou)
