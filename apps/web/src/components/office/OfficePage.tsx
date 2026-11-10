@@ -591,12 +591,13 @@ export function OfficePage() {
           .flatMap((cat) => [cat, ...cat.kittens])
           .find((cat) => cat.key === selection.key) ?? null)
       : null;
-  const popoverOpen =
-    selection !== null &&
-    (selection.kind !== "cat" ||
-      (selectedCat !== null &&
-        selectedCat.zone === selection.zone &&
-        selectedCat.needsYou === selection.needsYou));
+  const selectionStale =
+    selection?.kind === "cat" &&
+    (selectedCat === null ||
+      selectedCat.zone !== selection.zone ||
+      selectedCat.needsYou !== selection.needsYou);
+  if (selectionStale) setSelection(null);
+  const popoverOpen = selection !== null && !selectionStale;
   const open = (kind: "host" | "boat" | "soon" | "overflow") => (anchor: Element) =>
     setSelection({ kind, anchor });
 
@@ -608,7 +609,7 @@ export function OfficePage() {
   // Cats with no spot left, listed from the overflow sign so every one stays reachable.
   const overflowLabel = (count: number) => `${count} more ${count === 1 ? "cat" : "cats"}`;
   const overflowCats = [
-    ...layout.desks.slice(desks.length),
+    ...layout.desks.slice(desks.length).flatMap((cat) => [cat, ...cat.kittens]),
     ...desks.flatMap((cat) => cat.kittens.slice(KITTEN_OFFSETS.length)),
     ...layout.breakRoom.slice(breakRoom.length),
     ...layout.lounge.slice(lounge.length),
