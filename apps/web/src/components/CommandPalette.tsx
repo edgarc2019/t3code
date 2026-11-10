@@ -57,6 +57,7 @@ import { useLocation, useNavigate } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
   BugIcon,
+  CatIcon,
   ChartNoAxesColumnIcon,
   CheckIcon,
   ChevronRightIcon,
@@ -1644,6 +1645,17 @@ function OpenCommandPaletteDialog(props: {
     shortcutCommand: "usage.open",
     run: async () => {
       await navigate({ to: "/usage" });
+    },
+  });
+
+  actionItems.push({
+    kind: "action",
+    value: "action:office",
+    searchTerms: ["office", "cats", "agents", "overview", "glance", "who is working"],
+    title: "Open office",
+    icon: <CatIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      await navigate({ to: "/office" });
     },
   });
 
