@@ -27,6 +27,7 @@ import { projectEnvironment } from "../../state/projects";
 import { useEnvironmentQuery } from "../../state/query";
 import { threadEnvironment } from "../../state/threads";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
+import { useStableCallback } from "../../hooks/useStableCallback";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -109,12 +110,12 @@ const activeSpecOf = (plans: ReadonlyArray<OrchestrationV2PlanArtifact>): Propos
 const trackerStorageKey = (projectKey: string) => `t3.office.ideaTracker.${projectKey}`;
 const trackerListeners = new Set<() => void>();
 
-// Kept in memory too, so a choice sticks for this session when storage is unavailable.
-const chosenTrackers = new Map<string, IdeaTracker>();
+// Used only when storage can't save a choice, so the choice still sticks for this session.
+const unsavedTrackers = new Map<string, IdeaTracker>();
 
 function readIdeaTracker(projectKey: string): IdeaTracker {
-  const chosen = chosenTrackers.get(projectKey);
-  if (chosen) return chosen;
+  const unsaved = unsavedTrackers.get(projectKey);
+  if (unsaved) return unsaved;
   try {
     const stored = window.localStorage.getItem(trackerStorageKey(projectKey));
     return IDEA_TRACKERS.some((option) => option.id === stored)
@@ -126,10 +127,11 @@ function readIdeaTracker(projectKey: string): IdeaTracker {
 }
 
 function writeIdeaTracker(projectKey: string, tracker: IdeaTracker) {
-  chosenTrackers.set(projectKey, tracker);
   try {
     window.localStorage.setItem(trackerStorageKey(projectKey), tracker);
+    unsavedTrackers.delete(projectKey);
   } catch {
+    unsavedTrackers.set(projectKey, tracker);
     // Storage can be unavailable (private mode); the in-memory choice lasts until reload.
   }
   for (const listener of trackerListeners) listener();
@@ -831,9 +833,15 @@ function IdeaFiledProbe(props: {
 }) {
   const { thread } = props;
   const detail = useThreadProjection(scopeThreadRef(thread.environmentId, thread.id));
-  const dispatch = useOrchestrationCommand(orchestrationEnvironment.v2.dispatchCommand);
-  const deleteThread = useOrchestrationCommand(threadEnvironment.delete);
+  // Stable, so a re-render never restarts the filing midway.
+  const dispatch = useStableCallback(
+    useOrchestrationCommand(orchestrationEnvironment.v2.dispatchCommand),
+  );
+  const deleteThread = useStableCallback(useOrchestrationCommand(threadEnvironment.delete));
   const written = useRef<string | null>(null);
+  // Steps already done for this filing; a retry resumes after them instead of redoing a step
+  // whose thread is already gone.
+  const doneSteps = useRef(new Set<string>());
 
   const runId = thread.latestRun?.runId ?? null;
   const detailRun = detail?.projection.runs.find((candidate) => candidate.id === runId);
@@ -902,22 +910,39 @@ function IdeaFiledProbe(props: {
         },
       });
     const attempt = async () => {
-      const steps: Array<() => Promise<{ readonly _tag: string }>> = [
-        ...filing.folded.map((idea) => () => setTag(thread.id, coversTag(idea.title), true)),
-        ...filing.folded.map((idea) => () => setTag(idea.id, IDEA_TAG, false)),
+      const steps: Array<readonly [string, () => Promise<{ readonly _tag: string }>]> = [
+        ...filing.folded.map(
+          (idea) =>
+            [`covers:${idea.id}`, () => setTag(thread.id, coversTag(idea.title), true)] as const,
+        ),
+        ...filing.folded.map(
+          (idea) => [`untag:${idea.id}`, () => setTag(idea.id, IDEA_TAG, false)] as const,
+        ),
         ...filing.folded
           .filter((idea) => idea.unused)
           .map(
-            (idea) => () =>
-              deleteThread({
-                environmentId: thread.environmentId,
-                input: { threadId: idea.id as EnvironmentThreadShell["id"], onlyIfUnused: true },
-              }),
+            (idea) =>
+              [
+                `delete:${idea.id}`,
+                () =>
+                  deleteThread({
+                    environmentId: thread.environmentId,
+                    input: {
+                      threadId: idea.id as EnvironmentThreadShell["id"],
+                      onlyIfUnused: true,
+                    },
+                  }),
+              ] as const,
           ),
-        ...(filing.filedTag ? [() => setTag(thread.id, filing.filedTag!, true)] : []),
+        ...(filing.filedTag
+          ? [["filed", () => setTag(thread.id, filing.filedTag!, true)] as const]
+          : []),
       ];
-      for (const step of steps) {
+      for (const [name, step] of steps) {
+        const key = `${resultKey}|${name}`;
+        if (doneSteps.current.has(key)) continue;
         const outcome = await step();
+        if (outcome._tag === "Success") doneSteps.current.add(key);
         if (cancelled) return;
         if (outcome._tag !== "Success") {
           timer = window.setTimeout(() => void attempt(), FILED_RETRY_MS);
