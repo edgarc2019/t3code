@@ -108,6 +108,12 @@ describe("ideas being implemented", () => {
     ).toBe("merged");
   });
 
+  it("follows the latest linked PR, even before the server has read it", () => {
+    const closed = pr({ state: "closed", isDraft: false });
+    const unsynced = { ...pr(closed.snapshot!), number: 8, linkedAt: "2026-11-11T00:00:00.000Z" };
+    expect(prStatus(implementer([closed, { ...unsynced, snapshot: null }]))).toBe("open");
+  });
+
   it("drops a shipped idea 7 days after its PR merged", () => {
     const merged = implementer([
       pr({ state: "merged", isDraft: false, mergedAt: "2026-11-04T13:00:00.000Z" }),

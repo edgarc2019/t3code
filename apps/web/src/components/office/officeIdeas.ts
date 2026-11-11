@@ -131,14 +131,15 @@ function implementationOf(
     .toSorted((a, b) => b.thread.createdAt.localeCompare(a.thread.createdAt))[0];
   if (!implementer) return null;
   const latest = implementer.thread.pullRequests
-    .filter((pr) => pr.snapshot !== null)
     .toSorted((a, b) => a.linkedAt.localeCompare(b.linkedAt))
     .at(-1);
-  const snapshot = latest?.snapshot;
-  if (!latest || !snapshot) return { threadId: implementer.threadId, pullRequest: null };
-  if (snapshot.state === "closed") return null;
-  const status: IdeaPullRequestStatus =
-    snapshot.state === "merged"
+  if (!latest) return { threadId: implementer.threadId, pullRequest: null };
+  // A PR linked a moment ago has no snapshot until the server reads it; it shows as open.
+  const snapshot = latest.snapshot;
+  if (snapshot?.state === "closed") return null;
+  const status: IdeaPullRequestStatus = !snapshot
+    ? "open"
+    : snapshot.state === "merged"
       ? "merged"
       : snapshot.checksState === "failing"
         ? "failing"
@@ -151,7 +152,7 @@ function implementationOf(
       url: latest.url,
       number: latest.number,
       status,
-      mergedAt: snapshot.mergedAt ? Date.parse(snapshot.mergedAt) : null,
+      mergedAt: snapshot?.mergedAt ? Date.parse(snapshot.mergedAt) : null,
     },
   };
 }
