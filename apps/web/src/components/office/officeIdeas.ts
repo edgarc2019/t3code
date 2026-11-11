@@ -5,7 +5,10 @@ export const IDEA_TAG = "idea";
 const ISSUE_TAG_PREFIX = "issue:";
 const SPEC_TAG = "spec";
 const COVERS_TAG_PREFIX = "covers:";
+const IMPLEMENTER_TAG_PREFIX = "implementer:";
 const MAX_TAG_LENGTH = 64;
+/** A shipped idea stays on the corkboard this long after its PR merges. */
+const SHIPPED_FOR_MS = 7 * 24 * 60 * 60 * 1000;
 
 export type IdeaThread = Pick<EnvironmentThreadShell, "latestRun" | "archivedAt" | "deletedAt"> & {
   readonly source: { readonly tags?: ReadonlyArray<string> | undefined };
@@ -28,15 +31,56 @@ export type FiledRef =
     }
   | { readonly kind: "t3" };
 
-/** Where an idea is: on the board, being interviewed, or filed. */
+/** The thread an Implement started, as far as the corkboard follows it. */
+export type ImplementerThread = Pick<EnvironmentThreadShell, "createdAt" | "deletedAt"> & {
+  readonly pullRequests: ReadonlyArray<{
+    readonly url: string;
+    readonly number: number;
+    readonly linkedAt: string;
+    readonly snapshot: {
+      readonly state: "open" | "closed" | "merged";
+      readonly isDraft: boolean;
+      readonly checksState?: "passing" | "failing" | "pending" | null | undefined;
+      readonly mergedAt?: string | null | undefined;
+    } | null;
+  }>;
+};
+
+export type IdeaPullRequestStatus = "open" | "failing" | "ready" | "merged";
+
+/** A filed idea someone is implementing: its implementer's thread and the PR it linked, if any. */
+export interface IdeaImplementation {
+  readonly threadId: string;
+  readonly pullRequest: {
+    readonly url: string;
+    readonly number: number;
+    readonly status: IdeaPullRequestStatus;
+  } | null;
+}
+
+/** Where an idea is: on the board, being interviewed, or filed (and maybe being implemented). */
 export type IdeaStage =
   | { readonly kind: "board" }
   | { readonly kind: "interviewing" }
-  | { readonly kind: "filed"; readonly ref: FiledRef; readonly covers: ReadonlyArray<string> };
+  | {
+      readonly kind: "filed";
+      readonly ref: FiledRef;
+      readonly covers: ReadonlyArray<string>;
+      readonly implementation: IdeaImplementation | null;
+    };
 
 const tagsOf = (thread: IdeaThread) => thread.source.tags ?? [];
 
-export function ideaStage(thread: IdeaThread): IdeaStage | null {
+/**
+ * Where an idea is now. `implementerOf` finds an implementer's thread by id in the idea's
+ * environment. A filed idea whose implementer was deleted, or whose PR closed unmerged, is plain
+ * Filed again; one whose PR merged more than {@link SHIPPED_FOR_MS} ago leaves the board.
+ */
+export function ideaStage(
+  thread: IdeaThread,
+  implementerOf: (threadId: string) => ImplementerThread | undefined,
+  now: number,
+): IdeaStage | null {
   if (thread.archivedAt !== null || thread.deletedAt !== null) return null;
   const tags = tagsOf(thread);
   if (!tags.includes(IDEA_TAG)) return null;
@@ -45,10 +89,82 @@ export function ideaStage(thread: IdeaThread): IdeaStage | null {
     const covers = tags
       .filter((tag) => tag.startsWith(COVERS_TAG_PREFIX))
       .map((tag) => tag.slice(COVERS_TAG_PREFIX.length));
-    return { kind: "filed", ref, covers };
+    const implementation = implementationOf(tags, implementerOf);
+    const pullRequest = implementation?.pullRequest;
+    if (
+      pullRequest?.status === "merged" &&
+      pullRequest.mergedAt !== null &&
+      now - pullRequest.mergedAt > SHIPPED_FOR_MS
+    ) {
+      return null;
+    }
+    return {
+      kind: "filed",
+      ref,
+      covers,
+      implementation: implementation && {
+        threadId: implementation.threadId,
+        pullRequest: pullRequest
+          ? { url: pullRequest.url, number: pullRequest.number, status: pullRequest.status }
+          : null,
+      },
+    };
   }
   return thread.latestRun === null ? { kind: "board" } : { kind: "interviewing" };
 }
+
+/** The newest live implementer, unless its latest PR closed without merging. */
+function implementationOf(
+  tags: ReadonlyArray<string>,
+  implementerOf: (threadId: string) => ImplementerThread | undefined,
+) {
+  const implementer = tags
+    .filter((tag) => tag.startsWith(IMPLEMENTER_TAG_PREFIX))
+    .map((tag) => {
+      const threadId = tag.slice(IMPLEMENTER_TAG_PREFIX.length);
+      return { threadId, thread: implementerOf(threadId) };
+    })
+    .filter(
+      (candidate): candidate is { threadId: string; thread: ImplementerThread } =>
+        candidate.thread !== undefined && candidate.thread.deletedAt === null,
+    )
+    .toSorted((a, b) => b.thread.createdAt.localeCompare(a.thread.createdAt))[0];
+  if (!implementer) return null;
+  const latest = implementer.thread.pullRequests
+    .toSorted((a, b) => a.linkedAt.localeCompare(b.linkedAt))
+    .at(-1);
+  if (!latest) return { threadId: implementer.threadId, pullRequest: null };
+  // A PR linked a moment ago has no snapshot until the server reads it; it shows as open.
+  const snapshot = latest.snapshot;
+  if (snapshot?.state === "closed") return null;
+  const status: IdeaPullRequestStatus = !snapshot
+    ? "open"
+    : snapshot.state === "merged"
+      ? "merged"
+      : snapshot.checksState === "failing"
+        ? "failing"
+        : snapshot.checksState === "passing" && !snapshot.isDraft
+          ? "ready"
+          : "open";
+  return {
+    threadId: implementer.threadId,
+    pullRequest: {
+      url: latest.url,
+      number: latest.number,
+      status,
+      mergedAt: snapshot?.mergedAt ? Date.parse(snapshot.mergedAt) : null,
+    },
+  };
+}
+
+/** Marks a filed idea as being implemented by this thread. */
+export const implementerTag = (threadId: string) => `${IMPLEMENTER_TAG_PREFIX}${threadId}`;
+
+/** The idea's implementer tags other than the one for `keepThreadId`. */
+export const staleImplementerTags = (tags: ReadonlyArray<string>, keepThreadId: string) =>
+  tags.filter(
+    (tag) => tag.startsWith(IMPLEMENTER_TAG_PREFIX) && tag !== implementerTag(keepThreadId),
+  );
 
 /** The first GitHub issue link in an agent's reply. */
 export function findFiledLink(text: string): FiledRef | null {

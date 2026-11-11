@@ -3,7 +3,7 @@ import type {
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/models";
 
-import { ideaStage, isConnectThread, type IdeaThread } from "./officeIdeas";
+import { IDEA_TAG, isConnectThread, type IdeaThread } from "./officeIdeas";
 
 /** A goal is a thread with this tag, titled with the goal. */
 export const GOAL_TAG = "goal";
@@ -22,7 +22,7 @@ export const isScoutThread = (thread: IdeaThread) =>
 
 /** Threads the office draws as stickies, goals or Scout instead of cats. */
 export const isOfficeHelperThread = (thread: IdeaThread) =>
-  (ideaStage(thread) !== null && thread.latestRun === null) ||
+  (isLive(thread) && tagsOf(thread).includes(IDEA_TAG) && thread.latestRun === null) ||
   isConnectThread(thread) ||
   isGoalThread(thread) ||
   isScoutThread(thread);
