@@ -84,6 +84,7 @@ export function GoalsBox(props: {
   const { project, threads } = props;
   const createThread = useOrchestrationCommand(threadEnvironment.create);
   const deleteThread = useOrchestrationCommand(threadEnvironment.delete);
+  const setThreadModel = useOrchestrationCommand(threadEnvironment.setModelSelection);
   const setTag = useTagCommand();
   const upsertTask = useAtomCommand(serverEnvironment.upsertScheduledTask, {
     label: "scout task upsert",
@@ -112,6 +113,21 @@ export function GoalsBox(props: {
     if (!template) return false;
     let scoutThreadId = scout[0]?.id ?? null;
     const firstTime = scoutThreadId === null;
+    // Runs on a bound thread use the thread's model, so a new cheap model goes on the thread too.
+    const scoutModel = scout[0]?.modelSelection;
+    if (
+      scoutModel &&
+      (scoutModel.instanceId !== props.cheapModel.instanceId ||
+        scoutModel.model !== props.cheapModel.model) &&
+      !(await step(() =>
+        setThreadModel({
+          environmentId: project.environmentId,
+          input: { threadId: scout[0]!.id, modelSelection: props.cheapModel },
+        }),
+      ))
+    ) {
+      return false;
+    }
     if (scoutThreadId === null) {
       if (nextGoals.length === 0) return true;
       const threadId = newThreadId();
@@ -152,6 +168,8 @@ export function GoalsBox(props: {
           schedule: { type: "interval", everyMs: SCOUT_EVERY_MS },
           projectId: project.id,
           threadId: scoutThreadId,
+          // Each check lists the whole week, so it needs no memory of earlier checks.
+          threadMode: "fresh_session",
           workspaceStrategy: { type: "root" },
           modelSelection: props.cheapModel,
           runtimeMode: template.runtimeMode,

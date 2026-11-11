@@ -38,7 +38,7 @@ describe("Scout's replies", () => {
     expect(parseScoutFinds(reply())).toEqual([]);
   });
 
-  it("carries each issue once, newest reply first, minus kept, dropped and filed ones", () => {
+  it("carries the latest check's issues, minus kept, dropped and filed ones", () => {
     const first = reply(
       "https://github.com/acme/cafe/issues/1 | Seats | Seating",
       "https://github.com/acme/cafe/issues/2 | Tea | Menu",
@@ -47,13 +47,13 @@ describe("Scout's replies", () => {
       "https://github.com/Acme/Cafe/issues/2 | Tea again | Menu",
       "https://github.com/acme/cafe/issues/3 | Stamps | Loyalty",
     );
+    const failed = "GitHub couldn't be reached, so no block this time.";
     const hidden = seenIssueKeys(["scout", "scout-dropped:acme/cafe#3", "idea"]);
+    // The latest check lists the whole week; a failed check keeps the one before it.
     expect(
-      pendingFinds([first, second], hidden).map((find) => [issueKey(find), find.title]),
-    ).toEqual([
-      ["acme/cafe#2", "Tea again"],
-      ["acme/cafe#1", "Seats"],
-    ]);
+      pendingFinds([first, second, failed], hidden).map((find) => [issueKey(find), find.title]),
+    ).toEqual([["acme/cafe#2", "Tea again"]]);
+    expect(pendingFinds([first, reply()], hidden)).toEqual([]);
   });
 });
 

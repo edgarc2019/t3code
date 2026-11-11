@@ -29,18 +29,14 @@ export const isOfficeHelperThread = (thread: IdeaThread) =>
 
 /**
  * The newest real thread in the project sets the model and access an idea's agents run with.
- * Connect runs, goals and Scout use the cheap model, so they never set it.
+ * Helper threads never set it: they use the cheap model, or an older pick.
  */
 export function templateThread(
   threads: ReadonlyArray<EnvironmentThreadShell>,
   project: EnvironmentProject,
 ): EnvironmentThreadShell | null {
   const candidates = threads.filter(
-    (thread) =>
-      thread.environmentId === project.environmentId &&
-      !isConnectThread(thread) &&
-      !isGoalThread(thread) &&
-      !isScoutThread(thread),
+    (thread) => thread.environmentId === project.environmentId && !isOfficeHelperThread(thread),
   );
   const newest = (list: ReadonlyArray<EnvironmentThreadShell>) =>
     list.toSorted((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null;
@@ -72,11 +68,10 @@ export function scoutPrompt(goals: ReadonlyArray<string>) {
     "Goals:",
     ...goals.map((goal) => `- ${goal}`),
     "",
-    "1. Run `date -u +%Y-%m-%dT%H:%M:%SZ` for the time now.",
-    '2. Find the latest "Checked at" time in this conversation. With none, use 7 days ago.',
-    '3. In this project\'s folder, list the issues opened since then: `gh issue list --state all --search "created:>=<that time>" --limit 100 --json number,title,url,body`. If that fails, say why and stop: write no "Checked at" line and no block, so the next check covers this time too.',
-    "4. Keep only issues that clearly match one of the goals. Skip issues you listed in an earlier check.",
-    '5. End your reply with "Checked at <the time from step 1>", then this block, one line per kept issue, with the goal copied exactly. Leave the block empty when nothing matches.',
+    "1. Run `date -u +%Y-%m-%d` and work out the date 7 days before it.",
+    '2. In this project\'s folder, list the issues opened since that date: `gh issue list --state all --search "created:>=<that date>" --limit 100 --json number,title,url,body`. If that fails, say why and stop, with no block.',
+    "3. Keep only issues that clearly match one of the goals.",
+    "4. End your reply with this block, one line per kept issue, with the goal copied exactly. Leave the block empty when nothing matches.",
     "",
     "```scout",
     "<issue url> | <issue title> | <goal>",
@@ -86,9 +81,12 @@ export function scoutPrompt(goals: ReadonlyArray<string>) {
 
 const ISSUE_URL = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+)\/?$/;
 
+const lastScoutBlock = (reply: string) =>
+  [...reply.matchAll(/```scout\s*\n([\s\S]*?)```/g)].at(-1)?.[1] ?? null;
+
 /** The issues in a reply's last ```scout block; lines that aren't `<issue url> | <title> | <goal>` are skipped. */
 export function parseScoutFinds(reply: string): ReadonlyArray<ScoutFind> {
-  const block = [...reply.matchAll(/```scout\s*\n([\s\S]*?)```/g)].at(-1)?.[1] ?? "";
+  const block = lastScoutBlock(reply) ?? "";
   return block.split("\n").flatMap((line) => {
     const parts = line
       .replace(/^\s*[-*]\s*/, "")
@@ -132,20 +130,14 @@ export function seenIssueKeys(tags: ReadonlyArray<string>): ReadonlySet<string> 
 }
 
 /**
- * What Scout is carrying: every issue his replies brought, newest reply first, once each, minus
- * the ones already kept, dropped or filed as an idea.
+ * What Scout is carrying: the matches in his latest check, minus the ones already kept, dropped or
+ * filed as an idea. Every check lists the past 7 days, so the latest one is the whole list; a
+ * failed check has no block and leaves the one before it in place.
  */
 export function pendingFinds(
   replies: ReadonlyArray<string>,
   hidden: ReadonlySet<string>,
 ): ReadonlyArray<ScoutFind> {
-  const seen = new Set(hidden);
-  return replies.toReversed().flatMap((reply) =>
-    parseScoutFinds(reply).filter((find) => {
-      const key = issueKey(find);
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    }),
-  );
+  const latest = replies.findLast((reply) => lastScoutBlock(reply) !== null) ?? "";
+  return parseScoutFinds(latest).filter((find) => !hidden.has(issueKey(find)));
 }
