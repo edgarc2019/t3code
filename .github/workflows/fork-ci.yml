@@ -1,0 +1,81 @@
+# CI for the edgarc2019/t3code fork. Upstream's workflows run on paid
+# Blacksmith runners and are disabled in this fork's Actions settings; this
+# file mirrors the web parts of ci.yml on GitHub's free runners. It lives in
+# its own file so merges from upstream never conflict with it.
+#
+# Ubuntu is pinned to 24.04, as upstream's runners are: ubuntu-latest is 26.04,
+# where Playwright 1.60 cannot install Chromium for the browser tests.
+name: Fork CI
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Lint and format
+    if: github.repository == 'edgarc2019/t3code'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Vite+
+        uses: ./.github/actions/setup-ci-deps
+
+      - name: Check
+        run: vp check
+
+  build:
+    name: Typecheck and build web
+    if: github.repository == 'edgarc2019/t3code'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Vite+
+        uses: ./.github/actions/setup-ci-deps
+        with:
+          save-pnpm-store: "false"
+
+      - name: Typecheck
+        run: vp run --filter @t3tools/web typecheck
+
+      - name: Build
+        run: vp run --filter @t3tools/web build
+
+  test_web:
+    name: Test web
+    if: github.repository == 'edgarc2019/t3code'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Vite+
+        uses: ./.github/actions/setup-ci-deps
+        with:
+          save-pnpm-store: "false"
+
+      # The browser project runs React tests in headless Chromium.
+      # As in ci.yml, apt runs only when the runner lacks a library Chromium needs.
+      - name: Install Chromium
+        run: |
+          node apps/web/node_modules/playwright/cli.js install --only-shell chromium
+          browser=$(find "$HOME/.cache/ms-playwright" -name chrome-headless-shell -type f -print -quit)
+          test -n "$browser"
+          if ldd "$browser" | grep '=> not found'; then
+            node apps/web/node_modules/playwright/cli.js install-deps chromium
+          fi
+
+      - name: Test
+        run: vp run --filter @t3tools/web test
