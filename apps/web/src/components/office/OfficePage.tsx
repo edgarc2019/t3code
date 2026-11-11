@@ -10,7 +10,12 @@ import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { useEffect, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 
 import { useNowMinute } from "../../hooks/useNowMinute";
-import { useProjects, useQuietThreadProjection, useQuietThreadShells } from "../../state/entities";
+import {
+  useProjects,
+  useQuietThreadProjection,
+  useQuietThreadShells,
+  useThreadShells,
+} from "../../state/entities";
 import { useEnvironments, usePrimaryEnvironmentId } from "../../state/environments";
 import { orchestrationEnvironment } from "../../state/orchestration";
 import { useEnvironmentQuery } from "../../state/query";
@@ -34,7 +39,8 @@ import {
   OfficeIdeasBoard,
   useOfficeIdeas,
 } from "./OfficeIdeasBoard";
-import { isConnectThread, isIdeaOnBoard } from "./officeIdeas";
+import { isGoalThread, isOfficeHelperThread } from "./officeScout";
+import { ScoutFinds, useScoutCarrying } from "./OfficeScoutViews";
 import { Dialog, DialogHeader, DialogPanel, DialogPopup, DialogTitle } from "../ui/dialog";
 import {
   boatVerifyRoute,
@@ -560,7 +566,7 @@ type Selection =
       readonly anchor: Element;
     }
   | {
-      readonly kind: "host" | "boat" | "soon" | "overflow";
+      readonly kind: "host" | "boat" | "scout" | "overflow";
       readonly anchor: Element;
     };
 
@@ -573,9 +579,14 @@ export function OfficePage() {
   const ideas = useOfficeIdeas();
   const boardIdeas = ideas.filter((idea) => idea.stage.kind === "board");
   const layout = layoutOffice(
-    threads.filter((thread) => !isIdeaOnBoard(thread) && !isConnectThread(thread)),
+    threads.filter((thread) => !isOfficeHelperThread(thread)),
     Date.parse(nowIso),
   );
+  // Scout's threads carry hidden tags for most people, so read them from every thread.
+  const allThreads = useThreadShells();
+  // Scout is paused when no project has a goal.
+  const hasGoals = allThreads.some(isGoalThread);
+  const carrying = useScoutCarrying(allThreads, ideas);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [ideasOpen, setIdeasOpen] = useState(false);
   const boatGates = findBoatGates(threads);
@@ -615,7 +626,7 @@ export function OfficePage() {
       selectedCat.needsYou !== selection.needsYou);
   if (selectionStale) setSelection(null);
   const popoverOpen = selection !== null && !selectionStale;
-  const open = (kind: "host" | "boat" | "soon" | "overflow") => (anchor: Element) =>
+  const open = (kind: "host" | "boat" | "scout" | "overflow") => (anchor: Element) =>
     setSelection({ kind, anchor });
 
   // Two rows of desks, a third only when they fill up.
@@ -759,16 +770,22 @@ export function OfficePage() {
   }
   {
     const [sx, sy] = iso(1.8, 7.7);
+    const scoutNews =
+      carrying.length > 0
+        ? `${carrying.length} new ${carrying.length === 1 ? "issue" : "issues"}`
+        : hasGoals
+          ? "on watch"
+          : "needs goals";
     drawn.push({
       depth: 9.5,
       node: (
         <g key="scout">
-          <Hit label="Scout fetches GitHub issues (coming soon)" onOpen={open("soon")}>
+          <Hit label={`Scout: ${scoutNews}`} onOpen={open("scout")}>
             <g transform={`translate(${sx},${sy})`}>
-              <OfficeDog />
+              <OfficeDog carrying={carrying.length > 0} />
             </g>
           </Hit>
-          <NameTag at={[sx + 8, sy - 54]} title="Scout" sub="coming soon" />
+          <NameTag at={[sx + 8, sy - 54]} title="Scout" sub={scoutNews} />
         </g>
       ),
     });
@@ -1016,10 +1033,13 @@ export function OfficePage() {
                 </button>
               ))}
             </div>
-          ) : selection?.kind === "soon" ? (
-            <p className="text-sm">
-              Coming soon: Scout, who fetches GitHub issues that match your goals.
-            </p>
+          ) : selection?.kind === "scout" ? (
+            <ScoutFinds
+              carrying={carrying}
+              threads={allThreads}
+              projects={projects}
+              hasGoals={hasGoals}
+            />
           ) : null}
         </PopoverPopup>
       </Popover>

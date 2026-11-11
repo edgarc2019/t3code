@@ -208,7 +208,8 @@ export function OfficeCat(props: { readonly fur: CatFur; readonly pose: CatPose 
 }
 
 /** Scout, a blue merle Australian shepherd, feet at (0, 0), facing right. */
-export function OfficeDog() {
+/** Scout. Carrying, he holds the issues he fetched in his mouth. */
+export function OfficeDog(props: { readonly carrying?: boolean }) {
   const dog = "var(--office-dog)";
   const dark = "var(--office-dog-dark)";
   const white = "var(--office-belly)";
@@ -289,6 +290,21 @@ export function OfficeDog() {
       <path d="M26 -41q5 -2 6 3q-3 1 -6 -1z" fill={dog} stroke={LINE} strokeWidth={0.8} />
       <circle cx={24.5} cy={-36} r={1.9} fill="var(--info)" />
       <circle cx={25} cy={-36.6} r={0.6} fill="var(--background)" />
+      {props.carrying ? (
+        <g transform="rotate(-12 34 -26)">
+          <rect
+            x={27}
+            y={-29}
+            width={15}
+            height={6}
+            rx={1.5}
+            fill="var(--background)"
+            stroke={LINE}
+            strokeWidth={0.8}
+          />
+          <path d="M30 -26h9" stroke="var(--muted-foreground)" strokeWidth={0.8} />
+        </g>
+      ) : null}
     </g>
   );
 }

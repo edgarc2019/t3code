@@ -50,9 +50,6 @@ export function ideaStage(thread: IdeaThread): IdeaStage | null {
   return thread.latestRun === null ? { kind: "board" } : { kind: "interviewing" };
 }
 
-/** An idea nobody has interviewed yet is a sticky note, not a cat. */
-export const isIdeaOnBoard = (thread: IdeaThread) => ideaStage(thread)?.kind === "board";
-
 /** The first GitHub issue link in an agent's reply. */
 export function findFiledLink(text: string): FiledRef | null {
   const github = /https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+)/.exec(text);

@@ -37,6 +37,8 @@ import { useEnvironmentSettings } from "../../hooks/useSettings";
 
 import { useEnvironmentProviders, usePrimaryEnvironmentId } from "../../state/environments";
 import { OFFICE_PALETTE_CLASS } from "./OfficeArt";
+import { GoalsBox } from "./OfficeScoutViews";
+import { templateThread } from "./officeScout";
 import {
   CONNECT_TAG,
   connectPrompt,
@@ -75,20 +77,6 @@ export function useOfficeIdeas(): ReadonlyArray<OfficeIdea> {
       return stage ? [{ thread, stage }] : [];
     })
     .toSorted((a, b) => a.thread.createdAt.localeCompare(b.thread.createdAt));
-}
-
-/** The newest thread in the project sets the model and access an idea's agents run with. */
-function templateThread(
-  threads: ReadonlyArray<EnvironmentThreadShell>,
-  project: EnvironmentProject,
-): EnvironmentThreadShell | null {
-  const inEnvironment = threads.filter((thread) => thread.environmentId === project.environmentId);
-  const newest = (list: ReadonlyArray<EnvironmentThreadShell>) =>
-    list.toSorted((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null;
-  return (
-    newest(inEnvironment.filter((thread) => thread.projectId === project.id)) ??
-    newest(inEnvironment)
-  );
 }
 
 const ideaTag = IDEA_TAG as ThreadTag;
@@ -628,6 +616,14 @@ export function OfficeIdeasBoard(props: {
         </Button>
       </form>
       {error ? <p className="text-xs text-destructive">{error}</p> : null}
+      {project ? (
+        <GoalsBox
+          key={keyOf(project)}
+          project={project}
+          threads={threads}
+          cheapModel={cheapModel}
+        />
+      ) : null}
       {glossaryError ? (
         <p className="text-xs text-muted-foreground">
           Couldn&apos;t read GLOSSARY.md ({glossaryError}), so Connect the dots works without it.
