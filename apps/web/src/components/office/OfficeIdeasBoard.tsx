@@ -171,7 +171,15 @@ export function OfficeIdeasBoard(props: {
         },
       }),
     );
-    if (tagged) setText("");
+    if (tagged) {
+      setText("");
+      return;
+    }
+    // An untagged empty thread is not an idea; drop it so a retry does not leave strays behind.
+    await deleteThread({
+      environmentId: project.environmentId,
+      input: { threadId, onlyIfUnused: true },
+    });
   };
 
   const interview = async (thread: EnvironmentThreadShell) => {
@@ -196,6 +204,8 @@ export function OfficeIdeasBoard(props: {
 
   const implement = async (thread: EnvironmentThreadShell, stage: IdeaStage) => {
     if (stage.kind !== "filed") return;
+    // Take the idea off the board first, so a failed untag can never launch a second implementer.
+    if (!(await run(() => setIdeaTag(thread.environmentId, thread, false)))) return;
     const threadId = newThreadId();
     const title = `Implement #${stage.issue.number}: ${thread.title}`;
     const started = await run(() =>
@@ -227,8 +237,10 @@ export function OfficeIdeasBoard(props: {
         },
       }),
     );
-    if (!started) return;
-    await run(() => setIdeaTag(thread.environmentId, thread, false));
+    if (!started) {
+      await setIdeaTag(thread.environmentId, thread, true);
+      return;
+    }
     props.onClose();
     void navigate({
       to: "/$environmentId/$threadId",
@@ -236,17 +248,19 @@ export function OfficeIdeasBoard(props: {
     });
   };
 
-  // An idea nobody touched is an empty thread, so removing it deletes it. Anything with history
-  // only leaves the board and stays a normal thread.
-  const remove = (thread: EnvironmentThreadShell, stage: IdeaStage) =>
-    run(() =>
-      stage.kind === "board"
-        ? deleteThread({
-            environmentId: thread.environmentId,
-            input: { threadId: thread.id, onlyIfUnused: true },
-          })
-        : setIdeaTag(thread.environmentId, thread, false),
-    );
+  // Removing takes the idea off the board. An idea nobody touched is an empty thread, so it is
+  // deleted too; one that ran, even from another device just now, stays a normal thread.
+  const remove = async (thread: EnvironmentThreadShell, stage: IdeaStage) => {
+    if (!(await run(() => setIdeaTag(thread.environmentId, thread, false)))) return;
+    if (stage.kind === "board") {
+      await run(() =>
+        deleteThread({
+          environmentId: thread.environmentId,
+          input: { threadId: thread.id, onlyIfUnused: true },
+        }),
+      );
+    }
+  };
 
   const section = (title: string, list: ReadonlyArray<OfficeIdea>) =>
     list.length === 0 ? null : (
@@ -382,11 +396,13 @@ export function IdeaIssueWatcher(props: { readonly ideas: ReadonlyArray<OfficeId
   );
 }
 
+const ISSUE_TAG_RETRY_MS = 10_000;
+
 function IdeaIssueProbe(props: { readonly thread: EnvironmentThreadShell }) {
   const { thread } = props;
   const detail = useThreadProjection(scopeThreadRef(thread.environmentId, thread.id));
   const dispatch = useOrchestrationCommand(orchestrationEnvironment.v2.dispatchCommand);
-  const sent = useRef<string | null>(null);
+  const written = useRef<string | null>(null);
   const issue =
     detail?.projection.turnItems
       .flatMap((item) =>
@@ -394,20 +410,31 @@ function IdeaIssueProbe(props: { readonly thread: EnvironmentThreadShell }) {
       )
       .findLast((ref) => ref !== null) ?? null;
   const tag = issue ? issueTag(issue) : null;
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- writes a thread tag to the server once per filed issue; no React state is synced
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- writes a thread tag to the server once per filed issue, retrying until it lands; no React state is synced
   useEffect(() => {
-    if (tag === null || sent.current === tag) return;
-    sent.current = tag;
-    void dispatch({
-      environmentId: thread.environmentId,
-      input: {
-        type: "thread.tag.set",
-        commandId: CommandId.make(randomUUID()),
-        threadId: thread.id,
-        tag: tag as ThreadTag,
-        tagged: true,
-      },
-    });
+    if (tag === null || written.current === tag) return;
+    let cancelled = false;
+    let timer: number | undefined;
+    const attempt = () =>
+      void dispatch({
+        environmentId: thread.environmentId,
+        input: {
+          type: "thread.tag.set",
+          commandId: CommandId.make(randomUUID()),
+          threadId: thread.id,
+          tag: tag as ThreadTag,
+          tagged: true,
+        },
+      }).then((result) => {
+        if (cancelled) return;
+        if (result._tag === "Success") written.current = tag;
+        else timer = window.setTimeout(attempt, ISSUE_TAG_RETRY_MS);
+      });
+    attempt();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
   }, [dispatch, tag, thread.environmentId, thread.id]);
   return null;
 }
