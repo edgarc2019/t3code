@@ -67,8 +67,15 @@ jobs:
           save-pnpm-store: "false"
 
       # The browser project runs React tests in headless Chromium.
+      # As in ci.yml, apt runs only when the runner lacks a library Chromium needs.
       - name: Install Chromium
-        run: node apps/web/node_modules/playwright/cli.js install --with-deps --only-shell chromium
+        run: |
+          node apps/web/node_modules/playwright/cli.js install --only-shell chromium
+          browser=$(find "$HOME/.cache/ms-playwright" -name chrome-headless-shell -type f -print -quit)
+          test -n "$browser"
+          if ldd "$browser" | grep '=> not found'; then
+            node apps/web/node_modules/playwright/cli.js install-deps chromium
+          fi
 
       - name: Test
         run: vp run --filter @t3tools/web test
