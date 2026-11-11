@@ -2,6 +2,9 @@
 # Blacksmith runners and are disabled in this fork's Actions settings; this
 # file mirrors the web parts of ci.yml on GitHub's free runners. It lives in
 # its own file so merges from upstream never conflict with it.
+#
+# Ubuntu is pinned to 24.04, as upstream's runners are: ubuntu-latest is 26.04,
+# where Playwright 1.60 cannot install Chromium for the browser tests.
 name: Fork CI
 
 on:
@@ -20,7 +23,7 @@ jobs:
   check:
     name: Lint and format
     if: github.repository == 'edgarc2019/t3code'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
@@ -34,7 +37,7 @@ jobs:
   build:
     name: Typecheck and build web
     if: github.repository == 'edgarc2019/t3code'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
@@ -53,7 +56,7 @@ jobs:
   test_web:
     name: Test web
     if: github.repository == 'edgarc2019/t3code'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
