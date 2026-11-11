@@ -34,6 +34,7 @@ import {
   groupSidebarThreadsByProject,
   resolveSidebarFolderDot,
   sidebarFolderExpansionKeys,
+  splitOfficeHelperThreads,
 } from "./Sidebar.logic";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import {
@@ -1648,5 +1649,40 @@ describe("shouldCreateNewThreadInCurrentProject", () => {
     expect(shouldCreateNewThreadInCurrentProject(false, 1, 3)).toBe(true);
     expect(shouldCreateNewThreadInCurrentProject(false, 0, 0)).toBe(true);
     expect(shouldCreateNewThreadInCurrentProject(true, 2, 2)).toBe(true);
+  });
+});
+
+describe("splitOfficeHelperThreads", () => {
+  const tagged = (id: string, tags: string[], latestRun: Thread["latestRun"] = null) =>
+    makeThread({
+      id: ThreadId.make(id),
+      latestRun,
+      source: { ...makeThreadFixture().source, tags },
+    });
+  const ids = (threads: readonly Thread[]) => threads.map((thread) => thread.id);
+
+  it("hides the office's helpers and keeps real work listed", () => {
+    const threads = [
+      tagged("board-idea", ["idea"]),
+      tagged("goal", ["goal"]),
+      tagged("scout", ["scout"]),
+      tagged("connect", ["idea-connect"]),
+      tagged("interviewing", ["idea"], makeLatestRun()),
+      tagged("filed-run", ["idea", "issue:acme/app#4"], makeLatestRun()),
+      tagged("implementer", []),
+    ];
+    const { listed, helpers } = splitOfficeHelperThreads(threads, null);
+    expect(ids(helpers)).toEqual(["board-idea", "goal", "scout", "connect"]);
+    expect(ids(listed)).toEqual(["interviewing", "filed-run", "implementer"]);
+  });
+
+  it("keeps the open helper listed", () => {
+    const goal = tagged("goal", ["goal"]);
+    const { listed, helpers } = splitOfficeHelperThreads(
+      [goal],
+      scopedThreadKey(scopeThreadRef(goal.environmentId, goal.id)),
+    );
+    expect(ids(listed)).toEqual(["goal"]);
+    expect(helpers).toEqual([]);
   });
 });

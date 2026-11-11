@@ -42,6 +42,8 @@ import { observeIntersection } from "../lib/observeIntersection";
 import { deadlineAfter, deadlineStore } from "@t3tools/client-runtime/clock";
 import { useDeadlinePassed } from "../hooks/useDeadline";
 import { legacyProjectCwdPreferenceKey } from "../uiStateStore";
+import { isOfficeHelperThread } from "./office/officeScout";
+import type { IdeaThread } from "./office/officeIdeas";
 
 export function shouldNavigateAfterThreadPark(input: {
   readonly threadKey: string;
@@ -611,6 +613,23 @@ export function filterSidebarV2VisibleThreads<
       (scopedProjectKeys === null ||
         scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)),
   );
+}
+
+/**
+ * The Office's helpers (ideas still on the board, goals, Scout, connect runs) leave the list
+ * but stay searchable. The open one stays listed, as a closed shelf keeps it.
+ */
+export function splitOfficeHelperThreads<
+  T extends IdeaThread & Pick<SidebarThreadSummary, "environmentId" | "id">,
+>(threads: readonly T[], routeThreadKey: string | null): { listed: T[]; helpers: T[] } {
+  const listed: T[] = [];
+  const helpers: T[] = [];
+  for (const thread of threads) {
+    const isRoute =
+      scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) === routeThreadKey;
+    (isOfficeHelperThread(thread) && !isRoute ? helpers : listed).push(thread);
+  }
+  return { listed, helpers };
 }
 
 export function buildBulkTitleRegenerationContextMenuItem(input: {
