@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { findIssueLink, ideaStage, issueTag, type IdeaThread } from "./officeIdeas";
+import {
+  domainOf,
+  domainTagChanges,
+  findIssueLink,
+  ideaStage,
+  issueTag,
+  parseDomainAssignments,
+  type IdeaThread,
+} from "./officeIdeas";
 
 const thread = (
   tags: Array<string> | undefined,
@@ -48,5 +56,63 @@ describe("issue links", () => {
 
   it("skips a tag that would be longer than a thread tag allows", () => {
     expect(issueTag({ owner: "o".repeat(40), repo: "r".repeat(30), number: 1 })).toBeNull();
+  });
+});
+
+describe("connecting ideas by domain", () => {
+  const quote = "3f9c2a1b-0000-4000-8000-000000000001";
+  const rates = "7d1e0b2c-0000-4000-8000-000000000002";
+  const login = "a0b1c2d3-0000-4000-8000-000000000003";
+  const ids = [quote, rates, login];
+
+  it("reads the last domains block and normalizes the names", () => {
+    const reply = [
+      "Draft:",
+      "```domains",
+      "3f9c2a1b: wrong",
+      "```",
+      "Final:",
+      "```domains",
+      "3f9c2a1b: Quoting",
+      "- 7d1e0b2c: quoting ",
+      "a0b1c2d3: Broker Portal!",
+      "ffffffff: unknown-idea",
+      "```",
+    ].join("\n");
+    expect([...parseDomainAssignments(reply, ids)]).toEqual([
+      [quote, "quoting"],
+      [rates, "quoting"],
+      [login, "broker-portal"],
+    ]);
+    expect(parseDomainAssignments("No block here.", ids).size).toBe(0);
+    expect([
+      ...parseDomainAssignments("Sorted:\n3f9c2a1b: menu\n7d1e0b2c: seating\nDone.", ids),
+    ]).toEqual([
+      [quote, "menu"],
+      [rates, "seating"],
+    ]);
+  });
+
+  it("replaces an idea's old domain and leaves unmentioned ideas alone", () => {
+    const changes = domainTagChanges(
+      [
+        { id: quote, tags: ["idea", "domain:pricing"] },
+        { id: rates, tags: ["idea", "domain:quoting"] },
+        { id: login, tags: ["idea", "domain:auth"] },
+      ],
+      new Map([
+        [quote, "quoting"],
+        [rates, "quoting"],
+      ]),
+    );
+    expect(changes).toEqual([
+      { threadId: quote, tag: "domain:pricing", tagged: false },
+      { threadId: quote, tag: "domain:quoting", tagged: true },
+    ]);
+  });
+
+  it("reads an idea's domain back from its tags", () => {
+    expect(domainOf(thread(["idea", "domain:quoting"]))).toBe("quoting");
+    expect(domainOf(thread(["idea"]))).toBeNull();
   });
 });

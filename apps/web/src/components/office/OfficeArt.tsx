@@ -28,6 +28,7 @@ export const OFFICE_PALETTE_CLASS = [
   "[--office-slab-side:color-mix(in_oklab,var(--office-slab)_80%,black)]",
   "[--office-door:color-mix(in_oklab,var(--office-wood)_75%,black)]",
   "[--office-floor-label:color-mix(in_oklab,var(--muted-foreground)_70%,transparent)]",
+  "[--office-cork:color-mix(in_oklab,var(--warning)_22%,var(--card))]",
 ].join(" ");
 
 export type CatFur = "tux" | "orange" | "grey" | "cream";
