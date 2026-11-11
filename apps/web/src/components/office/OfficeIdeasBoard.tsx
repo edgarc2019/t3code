@@ -49,7 +49,7 @@ import {
   filedLabel,
   filedTag,
   filedUrl,
-  findFiledLink,
+  filingOfRun,
   IDEA_TRACKERS,
   implementPrompt,
   interviewPrompt,
@@ -109,7 +109,12 @@ const activeSpecOf = (plans: ReadonlyArray<OrchestrationV2PlanArtifact>): Propos
 const trackerStorageKey = (projectKey: string) => `t3.office.ideaTracker.${projectKey}`;
 const trackerListeners = new Set<() => void>();
 
+// Kept in memory too, so a choice sticks for this session when storage is unavailable.
+const chosenTrackers = new Map<string, IdeaTracker>();
+
 function readIdeaTracker(projectKey: string): IdeaTracker {
+  const chosen = chosenTrackers.get(projectKey);
+  if (chosen) return chosen;
   try {
     const stored = window.localStorage.getItem(trackerStorageKey(projectKey));
     return IDEA_TRACKERS.some((option) => option.id === stored)
@@ -121,10 +126,11 @@ function readIdeaTracker(projectKey: string): IdeaTracker {
 }
 
 function writeIdeaTracker(projectKey: string, tracker: IdeaTracker) {
+  chosenTrackers.set(projectKey, tracker);
   try {
     window.localStorage.setItem(trackerStorageKey(projectKey), tracker);
   } catch {
-    // Storage can be unavailable (private mode); the choice then lasts until reload.
+    // Storage can be unavailable (private mode); the in-memory choice lasts until reload.
   }
   for (const listener of trackerListeners) listener();
 }
@@ -791,7 +797,7 @@ function Corkboard(props: {
 }
 
 /**
- * Records what an interview filed once its run finishes: a GitHub or Linear link in its reply, or
+ * Records what an interview filed once its run finishes: a GitHub link in its reply, or
  * its proposed plan for a T3 spec. Folded-in ideas leave the board first (their titles saved as
  * `covers:` tags), then the filed tag goes on, which is what marks the interview done. Thread
  * summaries carry no reply text, so each interview being watched opens its own thread.
@@ -832,14 +838,22 @@ function IdeaFiledProbe(props: {
   const runId = thread.latestRun?.runId ?? null;
   const detailRun = detail?.projection.runs.find((candidate) => candidate.id === runId);
   const finished = detailRun !== undefined && FINISHED_RUN_STATUSES.has(detailRun.status);
-  const replies = finished
-    ? (detail?.projection.turnItems ?? []).flatMap((item) =>
-        item.type === "assistant_message" && !item.streaming ? [item.text] : [],
-      )
-    : [];
-  const linkReply = replies.findLast((text) => findFiledLink(text) !== null) ?? null;
-  const spec = finished && detail ? activeSpecOf(detail.projection.plans) : null;
-  const ref = linkReply ? findFiledLink(linkReply) : spec ? ({ kind: "t3" } as const) : null;
+  const filing =
+    finished && detail && runId !== null
+      ? filingOfRun(
+          runId,
+          detail.projection.turnItems.flatMap((item) =>
+            item.type === "assistant_message" && !item.streaming
+              ? [{ runId: item.runId, text: item.text }]
+              : [],
+          ),
+          detail.projection.plans.flatMap((plan) =>
+            plan.kind === "proposed_plan"
+              ? [{ runId: plan.runId, status: plan.status, markdown: plan.markdown }]
+              : [],
+          ),
+        )
+      : null;
   const candidates = props.ideas.filter(
     ({ thread: other, stage }) =>
       other.id !== thread.id &&
@@ -848,19 +862,27 @@ function IdeaFiledProbe(props: {
       stage.kind === "board",
   );
   const result: FilingResult | null =
-    ref === null
+    filing === null
       ? null
       : {
-          filedTag: filedTag(ref),
+          filedTag: filedTag(filing.ref),
           folded: parseBundledIdeas(
-            linkReply ?? spec?.markdown ?? "",
+            filing.text,
             candidates.map(({ thread: other }) => other.id),
           ).map((id) => {
             const other = candidates.find(({ thread: candidate }) => candidate.id === id)!.thread;
             return { id, title: other.title, unused: other.latestRun === null };
           }),
         };
-  const resultKey = result === null ? null : JSON.stringify(result);
+  // Folding removes ideas from the board, which would change this result mid-apply; the first
+  // result for a run is kept until it has been written.
+  const [frozen, setFrozen] = useState<{ readonly runId: string; readonly key: string } | null>(
+    null,
+  );
+  if (result !== null && runId !== null && frozen?.runId !== runId) {
+    setFrozen({ runId, key: JSON.stringify(result) });
+  }
+  const resultKey = frozen !== null && frozen.runId === runId ? frozen.key : null;
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- writes the filing to the server (folded ideas, then the filed tag), retrying until it lands; no React state is synced
   useEffect(() => {

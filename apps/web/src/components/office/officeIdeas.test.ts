@@ -4,6 +4,7 @@ import {
   domainOf,
   domainTagChanges,
   filedTag,
+  filingOfRun,
   findFiledLink,
   ideaStage,
   interviewPrompt,
@@ -33,11 +34,9 @@ describe("ideaStage", () => {
       ref: { kind: "github", owner: "acme", repo: "cafe", number: 12 },
       covers: [],
     });
-    expect(
-      ideaStage(thread(["idea", "linear:acme/CAFE-7", "covers:Seasonal drinks"], ran)),
-    ).toEqual({
+    expect(ideaStage(thread(["idea", "spec", "covers:Seasonal drinks"], ran))).toEqual({
       kind: "filed",
-      ref: { kind: "linear", workspace: "acme", key: "CAFE-7" },
+      ref: { kind: "t3" },
       covers: ["Seasonal drinks"],
     });
     expect(ideaStage(thread(["idea", "spec"], ran))).toEqual({
@@ -55,7 +54,7 @@ describe("ideaStage", () => {
 });
 
 describe("filed links", () => {
-  it("finds a GitHub or Linear issue in a reply and round-trips it through a tag", () => {
+  it("finds a GitHub issue in a reply and round-trips it through a tag", () => {
     const github = findFiledLink(
       "Filed it: https://github.com/edgarc2019/office-ideas-demo/issues/3 (and see #4).",
     );
@@ -67,12 +66,29 @@ describe("filed links", () => {
     });
     expect(filedTag(github!)).toBe("issue:edgarc2019/office-ideas-demo#3");
 
-    const linear = findFiledLink("Done: https://linear.app/cat-cafe/issue/CAFE-42/seasonal-menu");
-    expect(linear).toEqual({ kind: "linear", workspace: "cat-cafe", key: "CAFE-42" });
-    expect(filedTag(linear!)).toBe("linear:cat-cafe/CAFE-42");
-    expect(ideaStage(thread(["idea", filedTag(linear!)!], ran))).toMatchObject({
+    expect(ideaStage(thread(["idea", filedTag(github!)!], ran))).toMatchObject({
       kind: "filed",
-      ref: linear,
+      ref: github,
+    });
+  });
+
+  it("takes only what the finished interview run filed", () => {
+    const oldLink = { runId: "run-1", text: "Related: https://github.com/acme/cafe/issues/9" };
+    const oldPlan = { runId: "run-1", status: "active", markdown: "old scope" };
+    const newPlan = { runId: "run-2", status: "active", markdown: "new" };
+    // A spec written by this run wins over a link an earlier run mentioned.
+    expect(filingOfRun("run-2", [oldLink], [oldPlan, newPlan])).toEqual({
+      ref: { kind: "t3" },
+      text: "new",
+    });
+    // A run that wrote nothing files nothing, even with an older active plan around.
+    expect(
+      filingOfRun("run-2", [oldLink, { runId: "run-2", text: "No spec." }], [oldPlan]),
+    ).toBeNull();
+    const link = "https://github.com/acme/cafe/issues/12";
+    expect(filingOfRun("run-2", [{ runId: "run-2", text: link }], [])).toEqual({
+      ref: { kind: "github", owner: "acme", repo: "cafe", number: 12 },
+      text: link,
     });
   });
 
