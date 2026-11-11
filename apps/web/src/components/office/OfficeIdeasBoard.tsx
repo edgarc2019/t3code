@@ -54,9 +54,12 @@ import {
   filedUrl,
   filingOfRun,
   IDEA_TRACKERS,
+  implementerTag,
   implementPrompt,
+  staleImplementerTags,
   interviewPrompt,
   parseBundledIdeas,
+  type IdeaPullRequestStatus,
   type IdeaTracker,
   type IdeaStage,
 } from "./officeIdeas";
@@ -68,12 +71,18 @@ export interface OfficeIdea {
 
 /**
  * Every idea thread, hidden-tag ones included: a user who hides `idea` threads from the sidebar
- * still sees them on the whiteboard.
+ * still sees them on the whiteboard. `now` decides when a shipped idea leaves.
  */
-export function useOfficeIdeas(): ReadonlyArray<OfficeIdea> {
-  return useThreadShells()
+export function useOfficeIdeas(now: number): ReadonlyArray<OfficeIdea> {
+  const threads = useThreadShells();
+  const byKey = new Map(threads.map((thread) => [`${thread.environmentId}:${thread.id}`, thread]));
+  return threads
     .flatMap((thread) => {
-      const stage = ideaStage(thread);
+      const stage = ideaStage(
+        thread,
+        (threadId) => byKey.get(`${thread.environmentId}:${threadId}`),
+        now,
+      );
       return stage ? [{ thread, stage }] : [];
     })
     .toSorted((a, b) => a.thread.createdAt.localeCompare(b.thread.createdAt));
@@ -81,17 +90,25 @@ export function useOfficeIdeas(): ReadonlyArray<OfficeIdea> {
 
 const ideaTag = IDEA_TAG as ThreadTag;
 
-/** A T3 spec: the active proposed plan on an idea's thread. */
+/**
+ * A T3 spec: the proposed plan on an idea's thread. It is completed once an Implement starts,
+ * and stays usable so an idea back in Filed can be implemented again.
+ */
 interface ProposedSpec {
   readonly id: PlanId;
   readonly markdown: string;
+  readonly active: boolean;
 }
 
 const activeSpecOf = (plans: ReadonlyArray<OrchestrationV2PlanArtifact>): ProposedSpec | null => {
   const plan = plans.findLast(
-    (candidate) => candidate.kind === "proposed_plan" && candidate.status === "active",
+    (candidate) =>
+      candidate.kind === "proposed_plan" &&
+      (candidate.status === "active" || candidate.status === "completed"),
   );
-  return plan?.kind === "proposed_plan" ? { id: plan.id, markdown: plan.markdown } : null;
+  return plan?.kind === "proposed_plan"
+    ? { id: plan.id, markdown: plan.markdown, active: plan.status === "active" }
+    : null;
 };
 
 // The tracker is a per-device choice per project, so it lives in this browser's storage.
@@ -208,28 +225,28 @@ export function OfficeIdeasBoard(props: {
     }
     return true;
   };
-  const setIdeaTag = (
-    environmentId: EnvironmentId,
-    thread: EnvironmentThreadShell,
-    tagged: boolean,
-  ) =>
+  const setTag = (thread: EnvironmentThreadShell, tag: string, tagged: boolean) =>
     dispatch({
-      environmentId,
+      environmentId: thread.environmentId,
       input: {
         type: "thread.tag.set",
         commandId: CommandId.make(randomUUID()),
         threadId: thread.id,
-        tag: ideaTag,
+        tag: tag as ThreadTag,
         tagged,
       },
     });
-  const openThread = (thread: EnvironmentThreadShell) => {
+  const openThreadId = (environmentId: EnvironmentId, threadId: string) => {
     props.onClose();
     void navigate({
       to: "/$environmentId/$threadId",
-      params: buildThreadRouteParams(scopeThreadRef(thread.environmentId, thread.id)),
+      params: buildThreadRouteParams(
+        scopeThreadRef(environmentId, threadId as EnvironmentThreadShell["id"]),
+      ),
     });
   };
+  const openThread = (thread: EnvironmentThreadShell) =>
+    openThreadId(thread.environmentId, thread.id);
 
   const add = async () => {
     const title = text.trim();
@@ -339,9 +356,10 @@ export function OfficeIdeasBoard(props: {
       setError("This idea's spec isn't loaded yet. Try again in a moment.");
       return;
     }
-    // Take the idea off the board first, so a failed untag can never launch a second implementer.
-    if (!(await run(() => setIdeaTag(thread.environmentId, thread, false)))) return;
+    // Tag the implementer first, so a failed tag can never launch an implementer the board misses.
     const threadId = newThreadId();
+    const implementer = implementerTag(threadId);
+    if (!(await run(() => setTag(thread, implementer, true)))) return;
     const title = `Implement ${stage.ref.kind === "t3" ? "spec" : filedLabel(stage.ref)}: ${thread.title}`;
     // Create, then start: only a plain start carries the plan reference that marks a spec done.
     const created = await run(() =>
@@ -373,7 +391,9 @@ export function OfficeIdeasBoard(props: {
               attachments: [],
             },
             // Marks the spec implemented; the server checks it is still active and in this project.
-            ...(spec ? { sourceProposedPlan: { threadId: thread.id, planId: spec.id } } : {}),
+            ...(spec?.active
+              ? { sourceProposedPlan: { threadId: thread.id, planId: spec.id } }
+              : {}),
             runtimeMode: thread.runtimeMode,
             interactionMode: "default",
           },
@@ -386,8 +406,12 @@ export function OfficeIdeasBoard(props: {
           input: { threadId, onlyIfUnused: true },
         });
       }
-      await setIdeaTag(thread.environmentId, thread, true);
+      await setTag(thread, implementer, false);
       return;
+    }
+    // Earlier implementers (deleted, or their PR closed) no longer count; best effort.
+    for (const stale of staleImplementerTags(thread.source.tags ?? [], threadId)) {
+      await setTag(thread, stale, false);
     }
     props.onClose();
     void navigate({
@@ -399,7 +423,7 @@ export function OfficeIdeasBoard(props: {
   // Removing takes the idea off the board. An idea nobody touched is an empty thread, so it is
   // deleted too; one that ran, even from another device just now, stays a normal thread.
   const remove = async (thread: EnvironmentThreadShell, stage: IdeaStage) => {
-    if (!(await run(() => setIdeaTag(thread.environmentId, thread, false)))) return;
+    if (!(await run(() => setTag(thread, ideaTag, false)))) return;
     if (stage.kind === "board") {
       await run(() =>
         deleteThread({
@@ -507,32 +531,48 @@ export function OfficeIdeasBoard(props: {
     }
   };
 
-  const actions = ({ thread, stage }: OfficeIdea) => (
-    <div className="flex flex-wrap items-center gap-1">
-      {stage.kind === "board" ? (
-        <Button size="xs" disabled={busy} onClick={() => void interview(thread)}>
-          Interview
-        </Button>
-      ) : stage.kind === "interviewing" ? (
-        <Button size="xs" variant="outline" onClick={() => openThread(thread)}>
-          Open
-        </Button>
-      ) : stage.kind === "filed" && stage.ref.kind === "t3" ? (
-        <ImplementSpecButton
-          thread={thread}
+  const actions = ({ thread, stage }: OfficeIdea) => {
+    const implementation = stage.kind === "filed" ? stage.implementation : null;
+    return (
+      <div className="flex flex-wrap items-center gap-1">
+        {stage.kind === "board" ? (
+          <Button size="xs" disabled={busy} onClick={() => void interview(thread)}>
+            Interview
+          </Button>
+        ) : stage.kind === "interviewing" ? (
+          <Button size="xs" variant="outline" onClick={() => openThread(thread)}>
+            Open
+          </Button>
+        ) : implementation ? (
+          <Button
+            size="xs"
+            variant="outline"
+            onClick={() => openThreadId(thread.environmentId, implementation.threadId)}
+          >
+            Open
+          </Button>
+        ) : stage.kind === "filed" && stage.ref.kind === "t3" ? (
+          <ImplementSpecButton
+            thread={thread}
+            disabled={busy}
+            onImplement={(spec) => void implement(thread, stage, spec)}
+          />
+        ) : (
+          <Button size="xs" disabled={busy} onClick={() => void implement(thread, stage, null)}>
+            Implement
+          </Button>
+        )}
+        <Button
+          size="xs"
+          variant="ghost"
           disabled={busy}
-          onImplement={(spec) => void implement(thread, stage, spec)}
-        />
-      ) : (
-        <Button size="xs" disabled={busy} onClick={() => void implement(thread, stage, null)}>
-          Implement
+          onClick={() => void remove(thread, stage)}
+        >
+          Remove
         </Button>
-      )}
-      <Button size="xs" variant="ghost" disabled={busy} onClick={() => void remove(thread, stage)}>
-        Remove
-      </Button>
-    </div>
-  );
+      </div>
+    );
+  };
 
   return (
     <div className="flex w-full flex-col gap-4 text-sm">
@@ -661,29 +701,49 @@ const stickyAt = (index: number) => ({
   y: PANEL_TOP + Math.floor(index / 2) * (STICKY_H + 20) + (index % 2) * 28,
 });
 
-/** One cork panel per domain, red string through its stickies; unsorted ideas get no string. */
+const isShipped = (stage: IdeaStage) =>
+  stage.kind === "filed" && stage.implementation?.pullRequest?.status === "merged";
+
+const PR_STATUS_LABELS: Record<IdeaPullRequestStatus, string> = {
+  open: "open",
+  failing: "checks failing",
+  ready: "ready",
+  merged: "merged",
+};
+
+/**
+ * One cork panel per domain, red string through its stickies; unsorted ideas get no string.
+ * Shipped ideas leave their domain for a Shipped panel at the end.
+ */
 function Corkboard(props: {
   readonly ideas: ReadonlyArray<OfficeIdea>;
   readonly renderActions: (idea: OfficeIdea) => ReactNode;
 }) {
   const clusters = new Map<string | null, Array<OfficeIdea>>();
+  const shipped = props.ideas.filter((idea) => isShipped(idea.stage));
   for (const idea of props.ideas) {
+    if (isShipped(idea.stage)) continue;
     const domain = domainOf(idea.thread);
     clusters.set(domain, [...(clusters.get(domain) ?? []), idea]);
   }
-  const ordered = [...clusters.entries()].toSorted(
-    ([a, aIdeas], [b, bIdeas]) =>
-      (a === null ? 1 : 0) - (b === null ? 1 : 0) ||
-      bIdeas.length - aIdeas.length ||
-      (a ?? "").localeCompare(b ?? ""),
-  );
+  const ordered: Array<readonly [string | null, ReadonlyArray<OfficeIdea>, string]> = [
+    ...[...clusters.entries()]
+      .toSorted(
+        ([a, aIdeas], [b, bIdeas]) =>
+          (a === null ? 1 : 0) - (b === null ? 1 : 0) ||
+          bIdeas.length - aIdeas.length ||
+          (a ?? "").localeCompare(b ?? ""),
+      )
+      .map(([domain, ideas]) => [domain, ideas, domain ?? "Not connected yet"] as const),
+    ...(shipped.length > 0 ? [[null, shipped, "Shipped"] as const] : []),
+  ];
   const panelWidth = PANEL_PAD * 2 + STICKY_W * 2 + 24;
   return (
     <div
       className={`grid gap-4 rounded-lg p-4 sm:grid-cols-2 ${OFFICE_PALETTE_CLASS}`}
       style={{ background: "var(--office-cork)" }}
     >
-      {ordered.map(([domain, ideas]) => {
+      {ordered.map(([domain, ideas, label]) => {
         const rows = Math.ceil(ideas.length / 2);
         const height = PANEL_TOP + rows * (STICKY_H + 20) + (ideas.length > 1 ? 28 : 0) + 8;
         const pins = ideas.map((_, index) => {
@@ -692,13 +752,13 @@ function Corkboard(props: {
         });
         return (
           <section
-            key={domain ?? "unsorted"}
-            aria-label={domain ? `Domain ${domain}` : "Not connected yet"}
+            key={label === "Shipped" ? "shipped" : (domain ?? "unsorted")}
+            aria-label={domain ? `Domain ${domain}` : label}
             className="relative overflow-x-auto rounded-md border border-dashed border-border/70"
             style={{ minHeight: height }}
           >
             <div className="absolute left-3 top-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              {domain ?? "Not connected yet"}
+              {label}
             </div>
             <div className="relative" style={{ width: panelWidth, height }}>
               {ideas.map((idea, index) => {
@@ -738,6 +798,9 @@ function Corkboard(props: {
                             {filedLabel(idea.stage.ref)}
                           </span>
                         )}
+                        {idea.stage.implementation ? (
+                          <ImplementationLine implementation={idea.stage.implementation} />
+                        ) : null}
                         {idea.stage.covers.length > 0 ? (
                           <span className="truncate text-2xs text-muted-foreground">
                             also covers: {idea.stage.covers.join(", ")}
@@ -1068,4 +1131,28 @@ function ConnectProbe(props: {
     };
   }, [changesKey, dispatch, settle, run.environmentId, run.id]);
   return null;
+}
+
+/** "Implementing" until the implementer links a PR, then the PR and where it stands. */
+function ImplementationLine(props: {
+  readonly implementation: NonNullable<Extract<IdeaStage, { kind: "filed" }>["implementation"]>;
+}) {
+  const pr = props.implementation.pullRequest;
+  if (!pr) return <span className="text-2xs font-medium">Implementing</span>;
+  return (
+    <a
+      href={pr.url}
+      target="_blank"
+      rel="noreferrer"
+      className={`truncate text-2xs font-medium hover:underline ${
+        pr.status === "failing"
+          ? "text-destructive"
+          : pr.status === "ready" || pr.status === "merged"
+            ? "text-success"
+            : "text-primary"
+      }`}
+    >
+      PR #{pr.number} {PR_STATUS_LABELS[pr.status]}
+    </a>
+  );
 }

@@ -7,10 +7,12 @@ import {
   filingOfRun,
   findFiledLink,
   ideaStage,
+  implementerTag,
   interviewPrompt,
   parseBundledIdeas,
   parseDomainAssignments,
   type IdeaThread,
+  type ImplementerThread,
 } from "./officeIdeas";
 
 const thread = (
@@ -24,32 +26,101 @@ const thread = (
   ...overrides,
 });
 const ran = { latestRun: { runId: "run-1" } as unknown as IdeaThread["latestRun"] };
+const NOW = Date.parse("2026-11-11T12:00:00.000Z");
+const noImplementers = () => undefined;
+const stageOf = (idea: IdeaThread) => ideaStage(idea, noImplementers, NOW);
 
 describe("ideaStage", () => {
   it("follows an idea from the board through its interview to what it filed", () => {
-    expect(ideaStage(thread(["idea"]))).toEqual({ kind: "board" });
-    expect(ideaStage(thread(["idea"], ran))).toEqual({ kind: "interviewing" });
-    expect(ideaStage(thread(["idea", "issue:acme/cafe#12"], ran))).toEqual({
+    expect(stageOf(thread(["idea"]))).toEqual({ kind: "board" });
+    expect(stageOf(thread(["idea"], ran))).toEqual({ kind: "interviewing" });
+    expect(stageOf(thread(["idea", "issue:acme/cafe#12"], ran))).toEqual({
       kind: "filed",
       ref: { kind: "github", owner: "acme", repo: "cafe", number: 12 },
       covers: [],
+      implementation: null,
     });
-    expect(ideaStage(thread(["idea", "spec", "covers:Seasonal drinks"], ran))).toEqual({
+    expect(stageOf(thread(["idea", "spec", "covers:Seasonal drinks"], ran))).toEqual({
       kind: "filed",
       ref: { kind: "t3" },
       covers: ["Seasonal drinks"],
+      implementation: null,
     });
-    expect(ideaStage(thread(["idea", "spec"], ran))).toEqual({
+    expect(stageOf(thread(["idea", "spec"], ran))).toEqual({
       kind: "filed",
       ref: { kind: "t3" },
       covers: [],
+      implementation: null,
     });
   });
 
   it("ignores threads that are not ideas, or no longer are", () => {
-    expect(ideaStage(thread(undefined))).toBeNull();
-    expect(ideaStage(thread(["issue:acme/cafe#12"]))).toBeNull();
-    expect(ideaStage(thread(["idea"], { archivedAt: "2026-11-10T00:00:00.000Z" }))).toBeNull();
+    expect(stageOf(thread(undefined))).toBeNull();
+    expect(stageOf(thread(["issue:acme/cafe#12"]))).toBeNull();
+    expect(stageOf(thread(["idea"], { archivedAt: "2026-11-10T00:00:00.000Z" }))).toBeNull();
+  });
+});
+
+describe("ideas being implemented", () => {
+  const IMPLEMENTER_ID = "5f0c2a8e-1b7d-4c3e-9a6f-2d8b4e1c7a90";
+  const pr = (
+    snapshot: NonNullable<ImplementerThread["pullRequests"][number]["snapshot"]>,
+  ): ImplementerThread["pullRequests"][number] => ({
+    url: "https://github.com/acme/cafe/pull/7",
+    number: 7,
+    linkedAt: "2026-11-10T00:00:00.000Z",
+    snapshot,
+  });
+  const implementer = (
+    pullRequests: ImplementerThread["pullRequests"] = [],
+    deletedAt: string | null = null,
+  ): ImplementerThread => ({ createdAt: "2026-11-09T00:00:00.000Z", deletedAt, pullRequests });
+  const filedIdea = thread(["idea", "issue:acme/cafe#12", implementerTag(IMPLEMENTER_ID)], ran);
+  const stageWith = (found: ImplementerThread | undefined, now = NOW) =>
+    ideaStage(filedIdea, (threadId) => (threadId === IMPLEMENTER_ID ? found : undefined), now);
+  const prStatus = (found: ImplementerThread) => {
+    const stage = stageWith(found);
+    return stage?.kind === "filed" ? stage.implementation?.pullRequest?.status : "not filed";
+  };
+
+  it("keeps the idea as Implementing, linked to its implementer, until a PR shows up", () => {
+    expect(implementerTag(IMPLEMENTER_ID)).toHaveLength(48);
+    expect(stageWith(implementer())).toMatchObject({
+      kind: "filed",
+      implementation: { threadId: IMPLEMENTER_ID, pullRequest: null },
+    });
+  });
+
+  it("shows the implementer's PR as open, checks failing, ready or merged", () => {
+    const open = { state: "open", isDraft: false } as const;
+    expect(prStatus(implementer([pr({ ...open, checksState: "pending" })]))).toBe("open");
+    expect(prStatus(implementer([pr({ ...open, isDraft: true, checksState: "passing" })]))).toBe(
+      "open",
+    );
+    expect(prStatus(implementer([pr({ ...open, checksState: "failing" })]))).toBe("failing");
+    expect(prStatus(implementer([pr({ ...open, checksState: "passing" })]))).toBe("ready");
+    expect(
+      prStatus(
+        implementer([
+          pr({ state: "merged", isDraft: false, mergedAt: "2026-11-10T12:00:00.000Z" }),
+        ]),
+      ),
+    ).toBe("merged");
+  });
+
+  it("drops a shipped idea 7 days after its PR merged", () => {
+    const merged = implementer([
+      pr({ state: "merged", isDraft: false, mergedAt: "2026-11-04T13:00:00.000Z" }),
+    ]);
+    expect(stageWith(merged)).not.toBeNull();
+    expect(stageWith(merged, Date.parse("2026-11-11T13:00:01.000Z"))).toBeNull();
+  });
+
+  it("goes back to Filed when the implementer is deleted or its PR closes unmerged", () => {
+    const filed = { kind: "filed", implementation: null };
+    expect(stageWith(undefined)).toMatchObject(filed);
+    expect(stageWith(implementer([], "2026-11-10T00:00:00.000Z"))).toMatchObject(filed);
+    expect(stageWith(implementer([pr({ state: "closed", isDraft: false })]))).toMatchObject(filed);
   });
 });
 
@@ -66,7 +137,7 @@ describe("filed links", () => {
     });
     expect(filedTag(github!)).toBe("issue:edgarc2019/office-ideas-demo#3");
 
-    expect(ideaStage(thread(["idea", filedTag(github!)!], ran))).toMatchObject({
+    expect(stageOf(thread(["idea", filedTag(github!)!], ran))).toMatchObject({
       kind: "filed",
       ref: github,
     });

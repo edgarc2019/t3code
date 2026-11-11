@@ -576,7 +576,7 @@ export function OfficePage() {
   const { environments } = useEnvironments();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const nowIso = useNowMinute();
-  const ideas = useOfficeIdeas();
+  const ideas = useOfficeIdeas(Date.parse(nowIso));
   const boardIdeas = ideas.filter((idea) => idea.stage.kind === "board");
   const layout = layoutOffice(
     threads.filter((thread) => !isOfficeHelperThread(thread)),
