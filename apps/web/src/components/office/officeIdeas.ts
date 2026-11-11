@@ -3,23 +3,36 @@ import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/model
 /** An idea is a thread with this tag. Untagging it takes the idea off the whiteboard. */
 export const IDEA_TAG = "idea";
 const ISSUE_TAG_PREFIX = "issue:";
+const SPEC_TAG = "spec";
+const COVERS_TAG_PREFIX = "covers:";
 const MAX_TAG_LENGTH = 64;
 
 export type IdeaThread = Pick<EnvironmentThreadShell, "latestRun" | "archivedAt" | "deletedAt"> & {
   readonly source: { readonly tags?: ReadonlyArray<string> | undefined };
 };
 
-export interface IssueRef {
-  readonly owner: string;
-  readonly repo: string;
-  readonly number: number;
-}
+/** Where a project's interviews file their result. */
+export type IdeaTracker = "github" | "t3";
+export const IDEA_TRACKERS: ReadonlyArray<{ readonly id: IdeaTracker; readonly label: string }> = [
+  { id: "github", label: "GitHub Issues" },
+  { id: "t3", label: "T3 spec" },
+];
 
-/** Where an idea is: on the board, being interviewed, or filed as a GitHub issue. */
+/** What an interview filed: a GitHub issue, or a T3 proposed plan on its thread. */
+export type FiledRef =
+  | {
+      readonly kind: "github";
+      readonly owner: string;
+      readonly repo: string;
+      readonly number: number;
+    }
+  | { readonly kind: "t3" };
+
+/** Where an idea is: on the board, being interviewed, or filed. */
 export type IdeaStage =
   | { readonly kind: "board" }
   | { readonly kind: "interviewing" }
-  | { readonly kind: "filed"; readonly issue: IssueRef };
+  | { readonly kind: "filed"; readonly ref: FiledRef; readonly covers: ReadonlyArray<string> };
 
 const tagsOf = (thread: IdeaThread) => thread.source.tags ?? [];
 
@@ -27,48 +40,143 @@ export function ideaStage(thread: IdeaThread): IdeaStage | null {
   if (thread.archivedAt !== null || thread.deletedAt !== null) return null;
   const tags = tagsOf(thread);
   if (!tags.includes(IDEA_TAG)) return null;
-  const issue = tags.map(parseIssueTag).find((ref) => ref !== null) ?? null;
-  if (issue) return { kind: "filed", issue };
+  const ref = tags.map(parseFiledTag).find((candidate) => candidate !== null) ?? null;
+  if (ref) {
+    const covers = tags
+      .filter((tag) => tag.startsWith(COVERS_TAG_PREFIX))
+      .map((tag) => tag.slice(COVERS_TAG_PREFIX.length));
+    return { kind: "filed", ref, covers };
+  }
   return thread.latestRun === null ? { kind: "board" } : { kind: "interviewing" };
 }
 
 /** An idea nobody has interviewed yet is a sticky note, not a cat. */
 export const isIdeaOnBoard = (thread: IdeaThread) => ideaStage(thread)?.kind === "board";
 
-/** The first GitHub issue link in an agent's reply, such as the one the interview files. */
-export function findIssueLink(text: string): IssueRef | null {
-  const match = /https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+)/.exec(text);
-  return match ? { owner: match[1]!, repo: match[2]!, number: Number(match[3]) } : null;
+/** The first GitHub issue link in an agent's reply. */
+export function findFiledLink(text: string): FiledRef | null {
+  const github = /https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/issues\/(\d+)/.exec(text);
+  return github
+    ? { kind: "github", owner: github[1]!, repo: github[2]!, number: Number(github[3]) }
+    : null;
 }
 
-/** The tag that remembers a filed issue, or null when it would not fit in a tag. */
-export function issueTag(issue: IssueRef): string | null {
-  const tag = `${ISSUE_TAG_PREFIX}${issue.owner}/${issue.repo}#${issue.number}`;
+/** The tag that remembers what was filed, or null when it would not fit in a tag. */
+export function filedTag(ref: FiledRef): string | null {
+  const tag =
+    ref.kind === "github" ? `${ISSUE_TAG_PREFIX}${ref.owner}/${ref.repo}#${ref.number}` : SPEC_TAG;
   return tag.length <= MAX_TAG_LENGTH ? tag : null;
 }
 
-function parseIssueTag(tag: string): IssueRef | null {
-  const match = /^issue:([\w.-]+)\/([\w.-]+)#(\d+)$/.exec(tag);
-  return match ? { owner: match[1]!, repo: match[2]!, number: Number(match[3]) } : null;
+function parseFiledTag(tag: string): FiledRef | null {
+  if (tag === SPEC_TAG) return { kind: "t3" };
+  const github = /^issue:([\w.-]+)\/([\w.-]+)#(\d+)$/.exec(tag);
+  return github
+    ? { kind: "github", owner: github[1]!, repo: github[2]!, number: Number(github[3]) }
+    : null;
 }
 
-export const issueUrl = (issue: IssueRef) =>
-  `https://github.com/${issue.owner}/${issue.repo}/issues/${issue.number}`;
+export const filedUrl = (ref: FiledRef): string | null =>
+  ref.kind === "github" ? `https://github.com/${ref.owner}/${ref.repo}/issues/${ref.number}` : null;
 
-export const interviewPrompt = (idea: string) =>
-  [
-    "Interview me about this idea and turn it into a GitHub issue for this project.",
+export const filedLabel = (ref: FiledRef) =>
+  ref.kind === "github" ? `${ref.repo}#${ref.number}` : "Spec ready";
+
+/** Remembers a folded-in idea's title on the idea it joined, since the folded thread goes away. */
+export const coversTag = (title: string) =>
+  `${COVERS_TAG_PREFIX}${title}`.slice(0, MAX_TAG_LENGTH).trim();
+
+const TRACKER_STEPS: Record<IdeaTracker, ReadonlyArray<string>> = {
+  github: [
+    "- Then file the issue on this project's GitHub repository. I approve filing it: file it.",
+    "- End your reply with the ```bundled block, then the issue URL.",
+  ],
+  t3: [
+    "- Then write the spec as your proposed plan. Don't file it anywhere else: the plan is the spec.",
+    "- End the plan with the ```bundled block.",
+  ],
+};
+
+/**
+ * Interviews one idea. Linked ideas (same domain, still on the board) are offered for bundling;
+ * the agent asks before folding any in, and lists the ones I agreed to in a ```bundled block.
+ */
+export function interviewPrompt(
+  idea: string,
+  tracker: IdeaTracker,
+  linked: ReadonlyArray<{ readonly id: string; readonly title: string }>,
+) {
+  const what = tracker === "t3" ? "a spec" : "a GitHub issue";
+  return [
+    `Interview me about this idea and turn it into ${what} for this project.`,
     "",
     `Idea: ${idea}`,
+    ...(linked.length > 0
+      ? [
+          "",
+          "Linked ideas in the same area of the project (one-line ideas; the title is all there is):",
+          ...linked.map((other) => `- ${shortIdeaId(other.id)} ${other.title}`),
+        ]
+      : []),
     "",
     "- Read the code you need, then ask me questions with your question tool until the scope is clear.",
-    "- Then file the issue on this project's GitHub repository. I approve filing it: file it.",
+    ...(linked.length > 0
+      ? [
+          "- Ask me with your question tool which linked ideas belong in the same piece of work, your recommendation first. Fold in only the ones I agree to.",
+        ]
+      : []),
+    ...TRACKER_STEPS[tracker],
+    "- The ```bundled block lists the ids of the linked ideas I agreed to fold in, one per line, and is empty when there are none.",
     "- Do not edit files, write code, or open a pull request.",
-    "- End your reply with the issue URL.",
   ].join("\n");
+}
 
-export const implementPrompt = (issue: IssueRef) =>
-  `Implement GitHub issue ${issueUrl(issue)}.\n\nfull stop`;
+/**
+ * What a finished interview run filed, using only that run's replies and plans: a GitHub link in
+ * one of its replies, else a proposed plan it wrote (the T3 spec). Earlier runs never count, so
+ * an old link or an old plan can't pass for this interview's result.
+ */
+export function filingOfRun(
+  runId: string,
+  replies: ReadonlyArray<{ readonly runId: string | null; readonly text: string }>,
+  plans: ReadonlyArray<{
+    readonly runId: string | null;
+    readonly status: string;
+    readonly markdown: string;
+  }>,
+): { readonly ref: FiledRef; readonly text: string } | null {
+  const reply = replies.findLast(
+    (candidate) => candidate.runId === runId && findFiledLink(candidate.text) !== null,
+  );
+  if (reply) return { ref: findFiledLink(reply.text)!, text: reply.text };
+  const plan = plans.findLast(
+    (candidate) => candidate.runId === runId && candidate.status === "active",
+  );
+  return plan ? { ref: { kind: "t3" }, text: plan.markdown } : null;
+}
+
+/** The ideas a reply or plan folded in, from its last ```bundled block of short ids. */
+export function parseBundledIdeas(
+  text: string,
+  ideaIds: ReadonlyArray<string>,
+): ReadonlyArray<string> {
+  const block = [...text.matchAll(/```bundled\s*\n([\s\S]*?)```/g)].at(-1)?.[1] ?? "";
+  const shortIds = new Set(
+    [...block.matchAll(/\b([0-9a-f]{8})\b/gi)].map((match) => match[1]!.toLowerCase()),
+  );
+  return ideaIds.filter((id) => shortIds.has(shortIdeaId(id)));
+}
+
+export function implementPrompt(ref: FiledRef, spec: string | null) {
+  if (ref.kind !== "t3") return `Implement ${filedUrl(ref)}.\n\nfull stop`;
+  return [
+    "Implement this spec. It is already agreed: treat it as the plan and don't file an issue for it.",
+    "",
+    spec ?? "",
+    "",
+    "full stop",
+  ].join("\n");
+}
 
 /** A "Connect the dots" run is a thread with this tag; it is neither an idea nor a cat. */
 export const CONNECT_TAG = "idea-connect";
