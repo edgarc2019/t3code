@@ -28,6 +28,8 @@ import {
   type CatPose,
 } from "./OfficeArt";
 import { OfficeCatDetails } from "./OfficeCatDetails";
+import { IdeaIssueWatcher, OfficeIdeasBoard, useOfficeIdeas } from "./OfficeIdeasBoard";
+import { isIdeaOnBoard } from "./officeIdeas";
 import {
   boatVerifyRoute,
   currentTodoProgress,
@@ -551,7 +553,10 @@ type Selection =
       readonly needsYou: boolean;
       readonly anchor: Element;
     }
-  | { readonly kind: "host" | "boat" | "soon" | "overflow"; readonly anchor: Element };
+  | {
+      readonly kind: "host" | "boat" | "soon" | "overflow" | "ideas";
+      readonly anchor: Element;
+    };
 
 export function OfficePage() {
   const threads = useQuietThreadShells();
@@ -559,7 +564,12 @@ export function OfficePage() {
   const { environments } = useEnvironments();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const nowIso = useNowMinute();
-  const layout = layoutOffice(threads, Date.parse(nowIso));
+  const ideas = useOfficeIdeas();
+  const boardIdeas = ideas.filter((idea) => idea.stage.kind === "board");
+  const layout = layoutOffice(
+    threads.filter((thread) => !isIdeaOnBoard(thread)),
+    Date.parse(nowIso),
+  );
   const [selection, setSelection] = useState<Selection | null>(null);
   const boatGates = findBoatGates(threads);
   // A gate known to be on boat.dev wins, so one local gate can't hide a remote one.
@@ -598,7 +608,7 @@ export function OfficePage() {
       selectedCat.needsYou !== selection.needsYou);
   if (selectionStale) setSelection(null);
   const popoverOpen = selection !== null && !selectionStale;
-  const open = (kind: "host" | "boat" | "soon" | "overflow") => (anchor: Element) =>
+  const open = (kind: "host" | "boat" | "soon" | "overflow" | "ideas") => (anchor: Element) =>
     setSelection({ kind, anchor });
 
   // Two rows of desks, a third only when they fill up.
@@ -886,7 +896,7 @@ export function OfficePage() {
             />
             <line x1={1.8 * TILE_W} y1={0} x2={1.8 * TILE_W} y2={34} stroke="var(--border)" />
           </BackWall>
-          <Hit label="Ideas whiteboard (coming soon)" onOpen={open("soon")}>
+          <Hit label={`Ideas whiteboard, ${boardIdeas.length} on the board`} onOpen={open("ideas")}>
             <LeftWall y={4.8} top={74}>
               <rect
                 width={3.4 * TILE_W}
@@ -897,9 +907,9 @@ export function OfficePage() {
                 strokeWidth={1.2}
               />
               <text x={6} y={11} fontSize={9} fontWeight={700} fill="var(--foreground)">
-                IDEAS · soon
+                IDEAS · {boardIdeas.length}
               </text>
-              {[0, 1, 2, 3].map((index) => (
+              {[0, 1, 2, 3].slice(0, boardIdeas.length).map((index) => (
                 <rect
                   key={index}
                   x={6 + index * 19}
@@ -922,6 +932,7 @@ export function OfficePage() {
 
           {drawn.map((entry) => entry.node)}
         </svg>
+        <IdeaIssueWatcher ideas={ideas} />
 
         {firstNeed ? (
           <button
@@ -952,7 +963,12 @@ export function OfficePage() {
       </div>
 
       <Popover open={popoverOpen} onOpenChange={(next) => (next ? null : setSelection(null))}>
-        <PopoverPopup anchor={selection?.anchor ?? null} width="md" side="bottom" align="center">
+        <PopoverPopup
+          anchor={selection?.anchor ?? null}
+          width={selection?.kind === "ideas" ? "lg" : "md"}
+          side="bottom"
+          align="center"
+        >
           {selectedCat ? (
             <OfficeCatDetails
               key={selectedCat.key}
@@ -994,10 +1010,11 @@ export function OfficePage() {
                 </button>
               ))}
             </div>
+          ) : selection?.kind === "ideas" ? (
+            <OfficeIdeasBoard ideas={ideas} onClose={() => setSelection(null)} />
           ) : selection?.kind === "soon" ? (
             <p className="text-sm">
-              Coming soon: the ideas whiteboard and Scout, who fetches GitHub issues that match your
-              goals.
+              Coming soon: Scout, who fetches GitHub issues that match your goals.
             </p>
           ) : null}
         </PopoverPopup>
