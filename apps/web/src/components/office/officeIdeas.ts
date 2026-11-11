@@ -93,8 +93,6 @@ const domainSlug = (raw: string) =>
     .replaceAll(/^-+|-+$/g, "")
     .slice(0, MAX_DOMAIN_LENGTH);
 
-const MAX_GLOSSARY_CHARS = 6_000;
-
 /** The glossary goes into the prompt, so a small model never has to find and open it. */
 export const connectPrompt = (
   ideas: ReadonlyArray<{ readonly id: string; readonly title: string }>,
@@ -115,7 +113,7 @@ export const connectPrompt = (
     "",
     "Ideas:",
     ...ideas.map((idea) => `- ${shortIdeaId(idea.id)} ${idea.title}`),
-    ...(glossary ? ["", "GLOSSARY.md:", "", glossary.slice(0, MAX_GLOSSARY_CHARS)] : []),
+    ...(glossary ? ["", "GLOSSARY.md:", "", glossary] : []),
   ].join("\n");
 
 /**

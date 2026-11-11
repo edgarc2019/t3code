@@ -283,7 +283,10 @@ export function OfficeIdeasBoard(props: {
     }
   };
 
-  const { data: glossary } = useEnvironmentQuery<ProjectReadFileResult, unknown>(
+  const { data: glossary, error: glossaryError } = useEnvironmentQuery<
+    ProjectReadFileResult,
+    unknown
+  >(
     project
       ? projectEnvironment.readFile({
           environmentId: project.environmentId,
@@ -349,7 +352,7 @@ export function OfficeIdeasBoard(props: {
       });
       return;
     }
-    await run(() =>
+    const started = await run(() =>
       startTurn({
         environmentId: project.environmentId,
         input: {
@@ -368,6 +371,13 @@ export function OfficeIdeasBoard(props: {
         },
       }),
     );
+    // A connect thread that never started would block the button; drop it.
+    if (!started) {
+      await deleteThread({
+        environmentId: project.environmentId,
+        input: { threadId, onlyIfUnused: true },
+      });
+    }
   };
 
   const actions = ({ thread, stage }: OfficeIdea) => (
@@ -422,7 +432,9 @@ export function OfficeIdeasBoard(props: {
           <Button
             size="sm"
             variant="outline"
-            disabled={busy || projectIdeas.length < 2}
+            disabled={
+              busy || projectIdeas.length < 2 || (glossary === null && glossaryError === null)
+            }
             onClick={() => void connect()}
           >
             Connect the dots
@@ -448,6 +460,11 @@ export function OfficeIdeasBoard(props: {
         </Button>
       </form>
       {error ? <p className="text-xs text-destructive">{error}</p> : null}
+      {glossaryError ? (
+        <p className="text-xs text-muted-foreground">
+          Couldn&apos;t read GLOSSARY.md ({glossaryError}), so Connect the dots works without it.
+        </p>
+      ) : null}
       {projectIdeas.length === 0 ? (
         <p className="py-8 text-center text-muted-foreground">No ideas for this project yet.</p>
       ) : (
@@ -657,6 +674,13 @@ function IdeaIssueProbe(props: { readonly thread: EnvironmentThreadShell }) {
 }
 
 const CONNECT_RETRY_MS = 10_000;
+const FINISHED_RUN_STATUSES = new Set([
+  "completed",
+  "interrupted",
+  "failed",
+  "cancelled",
+  "rolled_back",
+]);
 
 /**
  * Applies a finished "Connect the dots" run: reads its domains block, writes each idea's
@@ -692,11 +716,17 @@ function ConnectProbe(props: {
   const detail = useThreadProjection(scopeThreadRef(run.environmentId, run.id));
   const dispatch = useOrchestrationCommand(orchestrationEnvironment.v2.dispatchCommand);
   const settle = useOrchestrationCommand(threadEnvironment.settle);
-  const reply =
-    detail?.projection.turnItems.findLast(
-      (item) => item.type === "assistant_message" && !item.streaming,
-    ) ?? null;
-  const replyText = reply?.type === "assistant_message" ? reply.text : null;
+  // The summary can say the run ended before the thread detail has its final reply, so wait until
+  // the detail itself shows that run finished. A run that ended with no usable reply settles empty.
+  const runId = run.latestRun?.runId ?? null;
+  const detailRun = detail?.projection.runs.find((candidate) => candidate.id === runId);
+  const finished = detailRun !== undefined && FINISHED_RUN_STATUSES.has(detailRun.status);
+  const reply = finished
+    ? detail?.projection.turnItems.findLast(
+        (item) => item.type === "assistant_message" && item.runId === runId && !item.streaming,
+      )
+    : undefined;
+  const replyText = finished ? (reply?.type === "assistant_message" ? reply.text : "") : null;
   const ideaTags = props.ideas.map(({ thread }) => ({
     id: thread.id as string,
     tags: thread.source.tags ?? [],
