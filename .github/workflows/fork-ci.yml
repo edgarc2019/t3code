@@ -1,0 +1,71 @@
+# CI for the edgarc2019/t3code fork. Upstream's workflows run on paid
+# Blacksmith runners and are disabled in this fork's Actions settings; this
+# file mirrors the web parts of ci.yml on GitHub's free runners. It lives in
+# its own file so merges from upstream never conflict with it.
+name: Fork CI
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Lint and format
+    if: github.repository == 'edgarc2019/t3code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Vite+
+        uses: ./.github/actions/setup-ci-deps
+
+      - name: Check
+        run: vp check
+
+  build:
+    name: Typecheck and build web
+    if: github.repository == 'edgarc2019/t3code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Vite+
+        uses: ./.github/actions/setup-ci-deps
+        with:
+          save-pnpm-store: "false"
+
+      - name: Typecheck
+        run: vp run --filter @t3tools/web typecheck
+
+      - name: Build
+        run: vp run --filter @t3tools/web build
+
+  test_web:
+    name: Test web
+    if: github.repository == 'edgarc2019/t3code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Vite+
+        uses: ./.github/actions/setup-ci-deps
+        with:
+          save-pnpm-store: "false"
+
+      # The browser project runs React tests in headless Chromium.
+      - name: Install Chromium
+        run: node apps/web/node_modules/playwright/cli.js install --with-deps --only-shell chromium
+
+      - name: Test
+        run: vp run --filter @t3tools/web test
