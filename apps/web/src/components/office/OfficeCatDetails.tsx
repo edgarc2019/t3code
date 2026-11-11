@@ -2,6 +2,7 @@ import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
 import {
   buildPendingUserInputAnswers,
+  setPendingUserInputCustomAnswer,
   togglePendingUserInputOptionSelection,
   type PendingUserInputDraftAnswer,
 } from "@t3tools/client-runtime/state/pending-user-input";
@@ -9,7 +10,11 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import type { ThreadPendingUserInput } from "@t3tools/client-runtime/state/thread-requests";
+import {
+  seedUserInputDraftAnswers,
+  type ThreadPendingApproval,
+  type ThreadPendingUserInput,
+} from "@t3tools/client-runtime/state/thread-requests";
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigate } from "@tanstack/react-router";
 import { CheckIcon } from "lucide-react";
@@ -21,9 +26,12 @@ import { environmentThreadDetails, threadEnvironment } from "../../state/threads
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { Badge } from "../ui/badge";
+import { ComposerPendingApprovalActions } from "../chat/ComposerPendingApprovalActions";
 import { Button } from "../ui/button";
+import { Textarea } from "../ui/textarea";
 import { catFurFor, OfficeCatAvatar, type CatPose } from "./OfficeArt";
 import { currentTodoProgress, type OfficeCat } from "./officeLayout";
+import { canAnswerInOffice, questionWantsTypedAnswer } from "./officeRequests";
 
 /** What the popover shows when a cat is clicked: the plan, and the question when it asks one. */
 export function OfficeCatDetails(props: {
@@ -40,6 +48,7 @@ export function OfficeCatDetails(props: {
   const navigate = useNavigate();
   const progress = structure ? currentTodoProgress(structure.projection.plans) : null;
   const question = pending?.userInputs[0] ?? null;
+  const approval = pending?.approvals[0] ?? null;
   const latest = thread.source.latestVisibleMessage;
   const summary =
     latest && latest.role === "assistant" ? latest.text.replace(/\s+/g, " ").trim() : null;
@@ -119,10 +128,13 @@ export function OfficeCatDetails(props: {
           input={question}
           onAnswered={props.onClose}
         />
-      ) : (pending?.approvals.length ?? 0) > 0 ? (
-        <p className="rounded-md border border-warning/40 bg-warning/8 p-2 text-xs">
-          Waiting for you to approve an action. Open the thread to approve or deny it.
-        </p>
+      ) : approval ? (
+        <OfficeApproval
+          key={approval.requestId}
+          environmentId={thread.environmentId}
+          threadId={thread.id}
+          approval={approval}
+        />
       ) : null}
 
       <div className="flex justify-end gap-2">
@@ -146,7 +158,7 @@ function statusVariant(cat: OfficeCat<EnvironmentThreadShell>) {
   return cat.zone === "lounge" ? ("success" as const) : ("secondary" as const);
 }
 
-/** Answers a question with its offered options; anything else is answered in the thread. */
+/** Answers a question by picking its options or typing; anything else is answered in the thread. */
 function OfficeQuestion(props: {
   readonly environmentId: EnvironmentThreadShell["environmentId"];
   readonly threadId: EnvironmentThreadShell["id"];
@@ -159,10 +171,11 @@ function OfficeQuestion(props: {
   const respond = useOrchestrationCommand(threadEnvironment.respondToUserInput, {
     reportFailure: false,
   });
-  const answerable =
-    props.input.responseCapability !== "not_resumable" &&
-    props.input.questions.every((question) => question.options.length > 0);
-  const answers = buildPendingUserInputAnswers(props.input.questions, drafts);
+  const answerable = canAnswerInOffice(props.input);
+  const answers = buildPendingUserInputAnswers(
+    props.input.questions,
+    seedUserInputDraftAnswers(props.input.questions, drafts),
+  );
 
   const send = async () => {
     if (!answers || sending) return;
@@ -189,6 +202,25 @@ function OfficeQuestion(props: {
             {question.header}
           </div>
           <div className="font-medium leading-snug">{question.question}</div>
+          {answerable && questionWantsTypedAnswer(question) ? (
+            <Textarea
+              size="sm"
+              aria-label={question.question}
+              placeholder="Type your answer"
+              value={drafts[question.id]?.customAnswer ?? question.initialAnswer ?? ""}
+              onChange={(event) => {
+                const customAnswer = event.target.value;
+                setDrafts((current) => ({
+                  ...current,
+                  [question.id]: setPendingUserInputCustomAnswer(
+                    question,
+                    current[question.id],
+                    customAnswer,
+                  ),
+                }));
+              }}
+            />
+          ) : null}
           {answerable
             ? question.options.map((option) => {
                 const value = option.value ?? option.label;
@@ -235,9 +267,77 @@ function OfficeQuestion(props: {
         </div>
       ) : (
         <p className="text-xs text-muted-foreground">
-          This question needs a typed answer. Open the thread to reply.
+          This question can't be answered here. Open the thread to reply.
         </p>
       )}
     </div>
   );
 }
+
+/** Shows what the agent wants to do, with the chat's approval choices. */
+function OfficeApproval(props: {
+  readonly environmentId: EnvironmentThreadShell["environmentId"];
+  readonly threadId: EnvironmentThreadShell["id"];
+  readonly approval: ThreadPendingApproval;
+}) {
+  const [responding, setResponding] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const respond = useOrchestrationCommand(threadEnvironment.respondToApproval, {
+    reportFailure: false,
+  });
+  const { approval } = props;
+  const live = approval.responseCapability === "live";
+
+  return (
+    <div className="flex flex-col gap-2 border-t pt-3 text-xs">
+      <div className="font-semibold uppercase tracking-wide text-muted-foreground">
+        {APPROVAL_LABELS[approval.requestKind]}
+      </div>
+      <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted p-2 font-mono">
+        {approval.detail || approval.requestKind}
+      </pre>
+      {approval.appName ? <p className="text-muted-foreground">{approval.appName}</p> : null}
+      {approval.reason ? <p className="text-muted-foreground">{approval.reason}</p> : null}
+      {live ? (
+        <div className="flex flex-wrap justify-end gap-2">
+          <ComposerPendingApprovalActions
+            requestId={approval.requestId}
+            isResponding={responding}
+            canRespond={live}
+            options={approval.options}
+            onRespondToApproval={async (requestId, decision) => {
+              if (responding) return;
+              setResponding(true);
+              setError(null);
+              const result = await respond({
+                environmentId: props.environmentId,
+                input: { threadId: props.threadId, requestId, decision },
+              });
+              if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+                const failure = squashAtomCommandFailure(result);
+                setError(
+                  failure instanceof Error ? failure.message : "Couldn't send the decision.",
+                );
+              }
+              setResponding(false);
+              return result;
+            }}
+          />
+        </div>
+      ) : (
+        <p className="text-warning">
+          The agent's process is gone. Open the thread to interrupt or restart it.
+        </p>
+      )}
+      {error ? <p className="text-destructive">{error}</p> : null}
+    </div>
+  );
+}
+
+const APPROVAL_LABELS = {
+  command: "Run a command",
+  "file-change": "Change files",
+  "file-read": "Read a file",
+  permission: "App permission",
+  "mcp-elicitation": "App access",
+} satisfies Record<ThreadPendingApproval["requestKind"], string>;
