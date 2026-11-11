@@ -3,9 +3,11 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   domainOf,
   domainTagChanges,
-  findIssueLink,
+  filedTag,
+  findFiledLink,
   ideaStage,
-  issueTag,
+  interviewPrompt,
+  parseBundledIdeas,
   parseDomainAssignments,
   type IdeaThread,
 } from "./officeIdeas";
@@ -23,12 +25,25 @@ const thread = (
 const ran = { latestRun: { runId: "run-1" } as unknown as IdeaThread["latestRun"] };
 
 describe("ideaStage", () => {
-  it("follows an idea from the board through its interview to a filed issue", () => {
+  it("follows an idea from the board through its interview to what it filed", () => {
     expect(ideaStage(thread(["idea"]))).toEqual({ kind: "board" });
     expect(ideaStage(thread(["idea"], ran))).toEqual({ kind: "interviewing" });
     expect(ideaStage(thread(["idea", "issue:acme/cafe#12"], ran))).toEqual({
       kind: "filed",
-      issue: { owner: "acme", repo: "cafe", number: 12 },
+      ref: { kind: "github", owner: "acme", repo: "cafe", number: 12 },
+      covers: [],
+    });
+    expect(
+      ideaStage(thread(["idea", "linear:acme/CAFE-7", "covers:Seasonal drinks"], ran)),
+    ).toEqual({
+      kind: "filed",
+      ref: { kind: "linear", workspace: "acme", key: "CAFE-7" },
+      covers: ["Seasonal drinks"],
+    });
+    expect(ideaStage(thread(["idea", "spec"], ran))).toEqual({
+      kind: "filed",
+      ref: { kind: "t3" },
+      covers: [],
     });
   });
 
@@ -39,23 +54,68 @@ describe("ideaStage", () => {
   });
 });
 
-describe("issue links", () => {
-  it("finds the filed issue in a reply and round-trips it through a tag", () => {
-    const issue = findIssueLink(
+describe("filed links", () => {
+  it("finds a GitHub or Linear issue in a reply and round-trips it through a tag", () => {
+    const github = findFiledLink(
       "Filed it: https://github.com/edgarc2019/office-ideas-demo/issues/3 (and see #4).",
     );
-    expect(issue).toEqual({ owner: "edgarc2019", repo: "office-ideas-demo", number: 3 });
-    const tag = issueTag(issue!);
-    expect(tag).toBe("issue:edgarc2019/office-ideas-demo#3");
-    expect(ideaStage(thread(["idea", tag!], ran))).toEqual({ kind: "filed", issue });
+    expect(github).toEqual({
+      kind: "github",
+      owner: "edgarc2019",
+      repo: "office-ideas-demo",
+      number: 3,
+    });
+    expect(filedTag(github!)).toBe("issue:edgarc2019/office-ideas-demo#3");
+
+    const linear = findFiledLink("Done: https://linear.app/cat-cafe/issue/CAFE-42/seasonal-menu");
+    expect(linear).toEqual({ kind: "linear", workspace: "cat-cafe", key: "CAFE-42" });
+    expect(filedTag(linear!)).toBe("linear:cat-cafe/CAFE-42");
+    expect(ideaStage(thread(["idea", filedTag(linear!)!], ran))).toMatchObject({
+      kind: "filed",
+      ref: linear,
+    });
   });
 
   it("does not take a pull request link for the issue", () => {
-    expect(findIssueLink("PR: https://github.com/acme/cafe/pull/7")).toBeNull();
+    expect(findFiledLink("PR: https://github.com/acme/cafe/pull/7")).toBeNull();
   });
 
   it("skips a tag that would be longer than a thread tag allows", () => {
-    expect(issueTag({ owner: "o".repeat(40), repo: "r".repeat(30), number: 1 })).toBeNull();
+    expect(
+      filedTag({ kind: "github", owner: "o".repeat(40), repo: "r".repeat(30), number: 1 }),
+    ).toBeNull();
+  });
+});
+
+describe("bundled ideas", () => {
+  const seat = "13707430-0000-4000-8000-000000000001";
+  const waitlist = "cffc2dd7-0000-4000-8000-000000000002";
+  const menu = "970b819c-0000-4000-8000-000000000003";
+
+  it("reads the ideas the interview folded in from its last bundled block", () => {
+    const text = [
+      "Spec...",
+      "```bundled",
+      "cffc2dd7",
+      "- 970b819c (not agreed, ignored below)",
+      "```",
+      "Final answer:",
+      "```bundled",
+      "- cffc2dd7 Text the waitlist",
+      "```",
+    ].join("\n");
+    expect(parseBundledIdeas(text, [seat, waitlist, menu])).toEqual([waitlist]);
+    expect(parseBundledIdeas("```bundled\n```", [seat, waitlist])).toEqual([]);
+    expect(parseBundledIdeas("no block", [seat, waitlist])).toEqual([]);
+  });
+
+  it("offers linked ideas only when there are some", () => {
+    const withLinks = interviewPrompt("Reserve the window seat", "t3", [
+      { id: waitlist, title: "Text the waitlist" },
+    ]);
+    expect(withLinks).toContain("- cffc2dd7 Text the waitlist");
+    expect(withLinks).toContain("which linked ideas belong");
+    expect(interviewPrompt("Reserve the window seat", "github", [])).not.toContain("Linked ideas");
   });
 });
 

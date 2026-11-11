@@ -11,12 +11,14 @@ import {
 import {
   CommandId,
   type EnvironmentId,
+  type OrchestrationV2PlanArtifact,
+  type PlanId,
   type ProjectReadFileResult,
   type ThreadTag,
 } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { ExternalLinkIcon } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 
 import { newMessageId, newThreadId, randomUUID } from "~/lib/utils";
 import { useProjects, useThreadProjection, useThreadShells } from "../../state/entities";
@@ -43,11 +45,16 @@ import {
   ideaStage,
   isConnectThread,
   parseDomainAssignments,
+  coversTag,
+  filedLabel,
+  filedTag,
+  filedUrl,
+  findFiledLink,
+  IDEA_TRACKERS,
   implementPrompt,
   interviewPrompt,
-  findIssueLink,
-  issueTag,
-  issueUrl,
+  parseBundledIdeas,
+  type IdeaTracker,
   type IdeaStage,
 } from "./officeIdeas";
 
@@ -85,6 +92,77 @@ function templateThread(
 
 const ideaTag = IDEA_TAG as ThreadTag;
 
+/** A T3 spec: the active proposed plan on an idea's thread. */
+interface ProposedSpec {
+  readonly id: PlanId;
+  readonly markdown: string;
+}
+
+const activeSpecOf = (plans: ReadonlyArray<OrchestrationV2PlanArtifact>): ProposedSpec | null => {
+  const plan = plans.findLast(
+    (candidate) => candidate.kind === "proposed_plan" && candidate.status === "active",
+  );
+  return plan?.kind === "proposed_plan" ? { id: plan.id, markdown: plan.markdown } : null;
+};
+
+// The tracker is a per-device choice per project, so it lives in this browser's storage.
+const trackerStorageKey = (projectKey: string) => `t3.office.ideaTracker.${projectKey}`;
+const trackerListeners = new Set<() => void>();
+
+function readIdeaTracker(projectKey: string): IdeaTracker {
+  try {
+    const stored = window.localStorage.getItem(trackerStorageKey(projectKey));
+    return IDEA_TRACKERS.some((option) => option.id === stored)
+      ? (stored as IdeaTracker)
+      : "github";
+  } catch {
+    return "github";
+  }
+}
+
+function writeIdeaTracker(projectKey: string, tracker: IdeaTracker) {
+  try {
+    window.localStorage.setItem(trackerStorageKey(projectKey), tracker);
+  } catch {
+    // Storage can be unavailable (private mode); the choice then lasts until reload.
+  }
+  for (const listener of trackerListeners) listener();
+}
+
+function subscribeIdeaTracker(listener: () => void) {
+  trackerListeners.add(listener);
+  window.addEventListener("storage", listener);
+  return () => {
+    trackerListeners.delete(listener);
+    window.removeEventListener("storage", listener);
+  };
+}
+
+function useIdeaTracker(projectKey: string | null): IdeaTracker {
+  return useSyncExternalStore(subscribeIdeaTracker, () =>
+    projectKey === null ? "github" : readIdeaTracker(projectKey),
+  );
+}
+
+/** Implement for a T3 spec reads the plan off the idea's thread, so only these stickies open it. */
+function ImplementSpecButton(props: {
+  readonly thread: EnvironmentThreadShell;
+  readonly disabled: boolean;
+  readonly onImplement: (spec: ProposedSpec) => void;
+}) {
+  const detail = useThreadProjection(scopeThreadRef(props.thread.environmentId, props.thread.id));
+  const spec = detail ? activeSpecOf(detail.projection.plans) : null;
+  return (
+    <Button
+      size="xs"
+      disabled={props.disabled || spec === null}
+      onClick={() => (spec ? props.onImplement(spec) : null)}
+    >
+      Implement
+    </Button>
+  );
+}
+
 export function OfficeIdeasBoard(props: {
   readonly ideas: ReadonlyArray<OfficeIdea>;
   readonly onClose: () => void;
@@ -95,6 +173,7 @@ export function OfficeIdeasBoard(props: {
   const createThread = useOrchestrationCommand(threadEnvironment.create);
   const startTurn = useOrchestrationCommand(threadEnvironment.startTurn);
   const deleteThread = useOrchestrationCommand(threadEnvironment.delete);
+  const setInteractionMode = useOrchestrationCommand(threadEnvironment.setInteractionMode);
   const dispatch = useOrchestrationCommand(orchestrationEnvironment.v2.dispatchCommand);
   const [text, setText] = useState("");
   const [projectKey, setProjectKey] = useState<string | null>(null);
@@ -113,6 +192,7 @@ export function OfficeIdeasBoard(props: {
   const project =
     projects.find((candidate) => keyOf(candidate) === projectKey) ?? recentProject ?? projects[0];
   // Connect runs are light, so they use the cheap model T3 already uses for titles.
+  const tracker = useIdeaTracker(project ? keyOf(project) : null);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const settingsEnvironmentId = (project?.environmentId ??
     primaryEnvironmentId ??
@@ -203,7 +283,36 @@ export function OfficeIdeasBoard(props: {
     });
   };
 
+  // Ideas on the same red string that nobody has interviewed yet; the interview offers to fold them in.
+  const linkedIdeas = (thread: EnvironmentThreadShell) => {
+    const domain = domainOf(thread);
+    if (domain === null) return [];
+    return props.ideas
+      .filter(
+        ({ thread: other, stage }) =>
+          other.id !== thread.id &&
+          other.environmentId === thread.environmentId &&
+          other.projectId === thread.projectId &&
+          stage.kind === "board" &&
+          domainOf(other) === domain,
+      )
+      .map(({ thread: other }) => ({ id: other.id, title: other.title }));
+  };
+
   const interview = async (thread: EnvironmentThreadShell) => {
+    // A turn's interaction mode does not switch an existing thread, so a T3 spec interview puts
+    // its thread in plan mode first, the way the chat's mode toggle does.
+    if (
+      tracker === "t3" &&
+      !(await run(() =>
+        setInteractionMode({
+          environmentId: thread.environmentId,
+          input: { threadId: thread.id, interactionMode: "plan" },
+        }),
+      ))
+    ) {
+      return;
+    }
     const started = await run(() =>
       startTurn({
         environmentId: thread.environmentId,
@@ -212,53 +321,75 @@ export function OfficeIdeasBoard(props: {
           message: {
             messageId: newMessageId(),
             role: "user",
-            text: interviewPrompt(thread.title),
+            text: interviewPrompt(thread.title, tracker, linkedIdeas(thread)),
             attachments: [],
           },
           runtimeMode: thread.runtimeMode,
-          interactionMode: "default",
+          // A T3 spec is the interview's proposed plan, so that interview runs in plan mode.
+          interactionMode: tracker === "t3" ? "plan" : "default",
         },
       }),
     );
     if (started) openThread(thread);
   };
 
-  const implement = async (thread: EnvironmentThreadShell, stage: IdeaStage) => {
+  const implement = async (
+    thread: EnvironmentThreadShell,
+    stage: IdeaStage,
+    spec: ProposedSpec | null,
+  ) => {
     if (stage.kind !== "filed") return;
+    if (stage.ref.kind === "t3" && spec === null) {
+      setError("This idea's spec isn't loaded yet. Try again in a moment.");
+      return;
+    }
     // Take the idea off the board first, so a failed untag can never launch a second implementer.
     if (!(await run(() => setIdeaTag(thread.environmentId, thread, false)))) return;
     const threadId = newThreadId();
-    const title = `Implement #${stage.issue.number}: ${thread.title}`;
-    const started = await run(() =>
-      startTurn({
+    const title = `Implement ${stage.ref.kind === "t3" ? "spec" : filedLabel(stage.ref)}: ${thread.title}`;
+    // Create, then start: only a plain start carries the plan reference that marks a spec done.
+    const created = await run(() =>
+      createThread({
         environmentId: thread.environmentId,
         input: {
           threadId,
-          message: {
-            messageId: newMessageId(),
-            role: "user",
-            text: implementPrompt(stage.issue),
-            attachments: [],
-          },
+          projectId: thread.projectId,
+          title,
           modelSelection: thread.modelSelection,
           runtimeMode: thread.runtimeMode,
           interactionMode: "default",
-          bootstrap: {
-            createThread: {
-              projectId: thread.projectId,
-              title,
-              modelSelection: thread.modelSelection,
-              runtimeMode: thread.runtimeMode,
-              interactionMode: "default",
-              branch: null,
-              worktreePath: null,
-              createdAt: new Date().toISOString(),
-            },
-          },
+          branch: null,
+          worktreePath: null,
         },
       }),
     );
+    const started =
+      created &&
+      (await run(() =>
+        startTurn({
+          environmentId: thread.environmentId,
+          input: {
+            threadId,
+            message: {
+              messageId: newMessageId(),
+              role: "user",
+              text: implementPrompt(stage.ref, spec?.markdown ?? null),
+              attachments: [],
+            },
+            // Marks the spec implemented; the server checks it is still active and in this project.
+            ...(spec ? { sourceProposedPlan: { threadId: thread.id, planId: spec.id } } : {}),
+            runtimeMode: thread.runtimeMode,
+            interactionMode: "default",
+          },
+        }),
+      ));
     if (!started) {
+      if (created) {
+        await deleteThread({
+          environmentId: thread.environmentId,
+          input: { threadId, onlyIfUnused: true },
+        });
+      }
       await setIdeaTag(thread.environmentId, thread, true);
       return;
     }
@@ -390,8 +521,14 @@ export function OfficeIdeasBoard(props: {
         <Button size="xs" variant="outline" onClick={() => openThread(thread)}>
           Open
         </Button>
+      ) : stage.kind === "filed" && stage.ref.kind === "t3" ? (
+        <ImplementSpecButton
+          thread={thread}
+          disabled={busy}
+          onImplement={(spec) => void implement(thread, stage, spec)}
+        />
       ) : (
-        <Button size="xs" disabled={busy} onClick={() => void implement(thread, stage)}>
+        <Button size="xs" disabled={busy} onClick={() => void implement(thread, stage, null)}>
           Implement
         </Button>
       )}
@@ -423,6 +560,29 @@ export function OfficeIdeasBoard(props: {
         ) : (
           <span className="font-medium">{project?.title ?? "No project yet"}</span>
         )}
+        {project ? (
+          <Select
+            value={tracker}
+            onValueChange={(next) =>
+              typeof next === "string"
+                ? writeIdeaTracker(keyOf(project), next as IdeaTracker)
+                : null
+            }
+          >
+            <SelectTrigger size="sm" className="w-44" aria-label="Where interviews file">
+              <SelectValue>
+                {IDEA_TRACKERS.find((option) => option.id === tracker)?.label}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectPopup alignItemWithTrigger={false}>
+              {IDEA_TRACKERS.map((option) => (
+                <SelectItem key={option.id} value={option.id}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
+        ) : null}
         <span className="flex-1" />
         {connecting ? (
           <Button size="sm" variant="outline" onClick={() => openThread(connecting)}>
@@ -475,7 +635,7 @@ export function OfficeIdeasBoard(props: {
 }
 
 const STICKY_W = 176;
-const STICKY_H = 108;
+const STICKY_H = 124;
 const PANEL_PAD = 16;
 const PANEL_TOP = 36;
 const STICKY_FILLS = [
@@ -558,15 +718,28 @@ function Corkboard(props: {
                       {idea.thread.title}
                     </div>
                     {idea.stage.kind === "filed" ? (
-                      <a
-                        href={issueUrl(idea.stage.issue)}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex items-center gap-0.5 truncate text-2xs text-primary hover:underline"
-                      >
-                        {idea.stage.issue.repo}#{idea.stage.issue.number}
-                        <ExternalLinkIcon className="size-3" />
-                      </a>
+                      <div className="flex min-w-0 flex-col">
+                        {filedUrl(idea.stage.ref) ? (
+                          <a
+                            href={filedUrl(idea.stage.ref) ?? undefined}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-0.5 truncate text-2xs text-primary hover:underline"
+                          >
+                            {filedLabel(idea.stage.ref)}
+                            <ExternalLinkIcon className="size-3" />
+                          </a>
+                        ) : (
+                          <span className="text-2xs font-medium text-success">
+                            {filedLabel(idea.stage.ref)}
+                          </span>
+                        )}
+                        {idea.stage.covers.length > 0 ? (
+                          <span className="truncate text-2xs text-muted-foreground">
+                            also covers: {idea.stage.covers.join(", ")}
+                          </span>
+                        ) : null}
+                      </div>
                     ) : idea.stage.kind === "interviewing" ? (
                       <span className="text-2xs text-muted-foreground">interviewing</span>
                     ) : null}
@@ -618,58 +791,125 @@ function Corkboard(props: {
 }
 
 /**
- * Remembers the issue an interview filed, as a tag on its thread, so the idea stays filed after the
- * conversation moves on. Thread summaries carry no reply text, so each interview being watched
- * opens its own thread; only interviews still waiting for an issue are watched.
+ * Records what an interview filed once its run finishes: a GitHub or Linear link in its reply, or
+ * its proposed plan for a T3 spec. Folded-in ideas leave the board first (their titles saved as
+ * `covers:` tags), then the filed tag goes on, which is what marks the interview done. Thread
+ * summaries carry no reply text, so each interview being watched opens its own thread.
  */
 export function IdeaIssueWatcher(props: { readonly ideas: ReadonlyArray<OfficeIdea> }) {
   return props.ideas.map(({ thread, stage }) =>
     stage.kind === "interviewing" ? (
-      <IdeaIssueProbe key={`${thread.environmentId}:${thread.id}`} thread={thread} />
+      <IdeaFiledProbe
+        key={`${thread.environmentId}:${thread.id}`}
+        thread={thread}
+        ideas={props.ideas}
+      />
     ) : null,
   );
 }
 
-const ISSUE_TAG_RETRY_MS = 10_000;
+const FILED_RETRY_MS = 10_000;
 
-function IdeaIssueProbe(props: { readonly thread: EnvironmentThreadShell }) {
+interface FilingResult {
+  readonly filedTag: string | null;
+  readonly folded: ReadonlyArray<{
+    readonly id: string;
+    readonly title: string;
+    readonly unused: boolean;
+  }>;
+}
+
+function IdeaFiledProbe(props: {
+  readonly thread: EnvironmentThreadShell;
+  readonly ideas: ReadonlyArray<OfficeIdea>;
+}) {
   const { thread } = props;
   const detail = useThreadProjection(scopeThreadRef(thread.environmentId, thread.id));
   const dispatch = useOrchestrationCommand(orchestrationEnvironment.v2.dispatchCommand);
+  const deleteThread = useOrchestrationCommand(threadEnvironment.delete);
   const written = useRef<string | null>(null);
-  const issue =
-    detail?.projection.turnItems
-      .flatMap((item) =>
-        item.type === "assistant_message" && !item.streaming ? [findIssueLink(item.text)] : [],
+
+  const runId = thread.latestRun?.runId ?? null;
+  const detailRun = detail?.projection.runs.find((candidate) => candidate.id === runId);
+  const finished = detailRun !== undefined && FINISHED_RUN_STATUSES.has(detailRun.status);
+  const replies = finished
+    ? (detail?.projection.turnItems ?? []).flatMap((item) =>
+        item.type === "assistant_message" && !item.streaming ? [item.text] : [],
       )
-      .findLast((ref) => ref !== null) ?? null;
-  const tag = issue ? issueTag(issue) : null;
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- writes a thread tag to the server once per filed issue, retrying until it lands; no React state is synced
+    : [];
+  const linkReply = replies.findLast((text) => findFiledLink(text) !== null) ?? null;
+  const spec = finished && detail ? activeSpecOf(detail.projection.plans) : null;
+  const ref = linkReply ? findFiledLink(linkReply) : spec ? ({ kind: "t3" } as const) : null;
+  const candidates = props.ideas.filter(
+    ({ thread: other, stage }) =>
+      other.id !== thread.id &&
+      other.environmentId === thread.environmentId &&
+      other.projectId === thread.projectId &&
+      stage.kind === "board",
+  );
+  const result: FilingResult | null =
+    ref === null
+      ? null
+      : {
+          filedTag: filedTag(ref),
+          folded: parseBundledIdeas(
+            linkReply ?? spec?.markdown ?? "",
+            candidates.map(({ thread: other }) => other.id),
+          ).map((id) => {
+            const other = candidates.find(({ thread: candidate }) => candidate.id === id)!.thread;
+            return { id, title: other.title, unused: other.latestRun === null };
+          }),
+        };
+  const resultKey = result === null ? null : JSON.stringify(result);
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- writes the filing to the server (folded ideas, then the filed tag), retrying until it lands; no React state is synced
   useEffect(() => {
-    if (tag === null || written.current === tag) return;
+    if (resultKey === null || written.current === resultKey) return;
+    const filing = JSON.parse(resultKey) as FilingResult;
     let cancelled = false;
     let timer: number | undefined;
-    const attempt = () =>
-      void dispatch({
+    const setTag = (threadId: string, tag: string, tagged: boolean) =>
+      dispatch({
         environmentId: thread.environmentId,
         input: {
           type: "thread.tag.set",
           commandId: CommandId.make(randomUUID()),
-          threadId: thread.id,
+          threadId: threadId as EnvironmentThreadShell["id"],
           tag: tag as ThreadTag,
-          tagged: true,
+          tagged,
         },
-      }).then((result) => {
-        if (cancelled) return;
-        if (result._tag === "Success") written.current = tag;
-        else timer = window.setTimeout(attempt, ISSUE_TAG_RETRY_MS);
       });
-    attempt();
+    const attempt = async () => {
+      const steps: Array<() => Promise<{ readonly _tag: string }>> = [
+        ...filing.folded.map((idea) => () => setTag(thread.id, coversTag(idea.title), true)),
+        ...filing.folded.map((idea) => () => setTag(idea.id, IDEA_TAG, false)),
+        ...filing.folded
+          .filter((idea) => idea.unused)
+          .map(
+            (idea) => () =>
+              deleteThread({
+                environmentId: thread.environmentId,
+                input: { threadId: idea.id as EnvironmentThreadShell["id"], onlyIfUnused: true },
+              }),
+          ),
+        ...(filing.filedTag ? [() => setTag(thread.id, filing.filedTag!, true)] : []),
+      ];
+      for (const step of steps) {
+        const outcome = await step();
+        if (cancelled) return;
+        if (outcome._tag !== "Success") {
+          timer = window.setTimeout(() => void attempt(), FILED_RETRY_MS);
+          return;
+        }
+      }
+      written.current = resultKey;
+    };
+    void attempt();
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [dispatch, tag, thread.environmentId, thread.id]);
+  }, [deleteThread, dispatch, resultKey, thread.environmentId, thread.id]);
   return null;
 }
 
